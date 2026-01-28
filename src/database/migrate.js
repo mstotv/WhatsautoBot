@@ -2,7 +2,10 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 const schema = `
@@ -116,16 +119,25 @@ CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts(status);
 `;
 
 async function migrate() {
-  const client = await pool.connect();
+  let client;
   try {
-    console.log('🔄 Running database migrations...');
+    console.log('🔄 Connecting to database for migrations...');
+    client = await pool.connect();
+    console.log('✅ Connected to database.');
+
+    console.log('🔄 Running schema updates...');
     await client.query(schema);
     console.log('✅ Database migrations completed successfully!');
   } catch (error) {
-    console.error('❌ Migration failed:', error);
+    console.error('❌ Migration failed:', error.message);
+    if (error.message.includes('ECONNREFUSED')) {
+      console.error('\n💡 HINT: Database connection refused.');
+      console.error('If this is in Docker/Coolify, ensure your DATABASE_URL does NOT use "localhost".');
+      console.error('Instead, use the service name (e.g., "postgres") or the actual server IP.\n');
+    }
     throw error;
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 

@@ -5,7 +5,10 @@ console.log('🔍 Testing database connection...\n');
 console.log('DATABASE_URL:', process.env.DATABASE_URL ? 'Found' : 'Not found');
 
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
 async function testConnection() {
@@ -23,7 +26,9 @@ async function testConnection() {
         process.exit(0);
     } catch (error) {
         console.error('❌ Connection failed:');
-        console.error('Error:', error.message);
+        console.error('Error Message:', error.message);
+        console.error('Error Code:', error.code);
+        console.error('Error Detail:', error.detail);
         console.error('Stack:', error.stack);
         process.exit(1);
     }
