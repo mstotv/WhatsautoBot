@@ -47,6 +47,9 @@ class SocketService {
             // console.log(`🔄 Polling active for ${instanceName}...`);
             try {
                 // Fetch latest messages from Evolution API
+                if (!evolutionAPI.client) {
+                    throw new Error('Evolution API client not initialized');
+                }
                 const response = await evolutionAPI.client.get(`/chat/findMessages/${instanceName}?limit=10`);
 
                 // Evolution API v2 puts messages in 'records' array

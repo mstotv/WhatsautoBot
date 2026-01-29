@@ -4,12 +4,21 @@ class EvolutionAPIService {
   constructor() {
     this.baseUrl = process.env.EVOLUTION_API_URL;
     this.apiKey = process.env.EVOLUTION_API_KEY;
-    
-    // Validate that required environment variables are present
+    this.client = null;
+
+    this.init();
+  }
+
+  /**
+   * Initialize the Axios client
+   */
+  init() {
+    this.baseUrl = process.env.EVOLUTION_API_URL;
+    this.apiKey = process.env.EVOLUTION_API_KEY;
+
     if (!this.baseUrl || !this.apiKey) {
       console.warn('⚠️ Warning: EVOLUTION_API_URL or EVOLUTION_API_KEY not set in environment variables');
-      this.client = null;
-      return;
+      return false;
     }
 
     this.client = axios.create({
@@ -21,16 +30,32 @@ class EvolutionAPIService {
         'Accept': 'application/json'
       }
     });
+    return true;
+  }
+
+  /**
+   * Ensure client is initialized before any request
+   */
+  ensureClient() {
+    if (!this.client) {
+      this.init();
+    }
+
+    if (!this.client) {
+      const missing = [];
+      if (!process.env.EVOLUTION_API_URL) missing.push('EVOLUTION_API_URL');
+      if (!process.env.EVOLUTION_API_KEY) missing.push('EVOLUTION_API_KEY');
+
+      throw new Error(`Evolution API client not initialized. Missing: ${missing.join(', ')}. Please check your environment variables.`);
+    }
   }
 
   /**
    * Create a new WhatsApp instance
    */
   async createInstance(instanceName, token) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.post('/instance/create', {
         instanceName: instanceName,
@@ -63,10 +88,8 @@ class EvolutionAPIService {
    * Get QR Code for an instance
    */
   async getQRCode(instanceName) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.get(`/instance/connect/${instanceName}`);
       return response.data;
@@ -80,10 +103,8 @@ class EvolutionAPIService {
    * Check instance connection status
    */
   async getInstanceStatus(instanceName) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.get(`/instance/connectionState/${instanceName}`);
       return response.data;
@@ -97,10 +118,8 @@ class EvolutionAPIService {
    * Logout and delete instance
    */
   async deleteInstance(instanceName) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       await this.client.delete(`/instance/logout/${instanceName}`);
       await this.client.delete(`/instance/delete/${instanceName}`);
@@ -115,10 +134,8 @@ class EvolutionAPIService {
    * Send text message
    */
   async sendTextMessage(instanceName, phoneNumber, text) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.post(`/message/sendText/${instanceName}`, {
         number: phoneNumber,
@@ -135,10 +152,8 @@ class EvolutionAPIService {
    * Send media message (image/video)
    */
   async sendMediaMessage(instanceName, phoneNumber, mediaUrl, caption, mediaType = 'image') {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const endpoint = mediaType === 'image' ? 'sendMedia' : 'sendMedia';
       const response = await this.client.post(`/message/${endpoint}/${instanceName}`, {
@@ -158,10 +173,8 @@ class EvolutionAPIService {
    * Set webhook for instance
    */
   async setWebhook(instanceName, webhookUrl) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.post(`/webhook/set/${instanceName}`, {
         enabled: true,
@@ -187,10 +200,8 @@ class EvolutionAPIService {
    * Get instance info including phone number
    */
   async getInstanceInfo(instanceName) {
-    if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
-    }
-    
+    this.ensureClient();
+
     try {
       const response = await this.client.get(`/instance/fetchInstances?instanceName=${instanceName}`);
       return response.data;
