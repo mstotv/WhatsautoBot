@@ -1,55 +1,11 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: whatsapp-bot-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-whatsapp_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whatsapp_pass}
-      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_bot}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - whatsapp-network
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whatsapp_user}" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Redis (for Queue)
-  redis:
-    image: redis:7-alpine
-    container_name: whatsapp-bot-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - whatsapp-network
-    healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # WhatsApp Bot Application
+  # WhatsApp Bot Application (using Supabase)
   app:
     build: .
     container_name: whatsapp-bot-app
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       # Telegram
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
@@ -59,11 +15,11 @@ services:
       EVOLUTION_API_URL: ${EVOLUTION_API_URL}
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
 
-      # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-whatsapp_user}:${POSTGRES_PASSWORD:-whatsapp_pass}@postgres:5432/${POSTGRES_DB:-whatsapp_bot}
+      # Database (Supabase - external)
+      DATABASE_URL: ${DATABASE_URL}
 
-      # Redis
-      REDIS_URL: redis://redis:6379
+      # Redis (use external or add here)
+      REDIS_URL: ${REDIS_URL:-redis://localhost:6379}
 
       # Server
       PORT: ${PORT:-3000}
@@ -71,17 +27,7 @@ services:
       WEBHOOK_URL: ${WEBHOOK_URL}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
-    networks:
-      - whatsapp-network
     volumes:
       - ./logs:/app/logs
 
-networks:
-  whatsapp-network:
-    driver: bridge
-
-volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
+# No local database - using Supabase
