@@ -140,6 +140,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'phone_number') THEN
     ALTER TABLE users ADD COLUMN phone_number VARCHAR(50);
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'language') THEN
+    ALTER TABLE users ADD COLUMN language VARCHAR(10) DEFAULT 'ar';
+  END IF;
 END $$;
 
 -- Add unique constraint on phone_number in users table
