@@ -5,11 +5,26 @@ const evolutionAPI = require('../services/evolutionAPI');
 
 class BroadcastQueue {
   constructor() {
-    this.queue = new Queue('broadcast', process.env.REDIS_URL || 'redis://localhost:6379');
-    this.setupProcessors();
+    // Use Redis if available, otherwise skip queue (for production without Redis)
+    const redisUrl = process.env.REDIS_URL;
+    if (redisUrl) {
+      this.queue = new Queue('broadcast', redisUrl);
+      this.setupProcessors();
+      console.log('✅ Broadcast queue initialized with Redis');
+    } else {
+      this.queue = null;
+      console.log('⚠️ Broadcast queue disabled (no Redis URL)');
+    }
+  }
+
+  // Check if queue is available
+  isAvailable() {
+    return this.queue !== null;
   }
 
   setupProcessors() {
+    if (!this.queue) return;
+    
     // Process broadcast jobs
     this.queue.process('send-broadcast', async (job) => {
       const { broadcastId, userId, instanceName } = job.data;
@@ -102,6 +117,11 @@ class BroadcastQueue {
   }
 
   async addBroadcastJob(broadcastId, userId, instanceName, telegramUserId) {
+    if (!this.isAvailable()) {
+      console.log('⚠️ Cannot add broadcast job - Redis not available');
+      return null;
+    }
+    
     const job = await this.queue.add('send-broadcast', {
       broadcastId,
       userId,

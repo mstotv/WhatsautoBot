@@ -18,8 +18,8 @@ services:
       # Database (Supabase - external)
       DATABASE_URL: ${DATABASE_URL}
 
-      # Redis (use external or add here)
-      REDIS_URL: ${REDIS_URL:-redis://localhost:6379}
+      # Redis (optional - leave empty if not using broadcast queue)
+      REDIS_URL: ${REDIS_URL:-}
 
       # Server
       PORT: ${PORT:-3000}
