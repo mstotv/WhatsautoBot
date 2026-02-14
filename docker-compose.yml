@@ -22,11 +22,11 @@ services:
       REDIS_URL: ${REDIS_URL:-}
 
       # Server
-      PORT: ${PORT:-3000}
+      PORT: ${PORT:-3004}
       NODE_ENV: ${NODE_ENV:-production}
       WEBHOOK_URL: ${WEBHOOK_URL}
     ports:
-      - "${PORT:-3000}:${PORT:-3000}"
+      - "${PORT:-3004}:${PORT:-3004}"
     volumes:
       - ./logs:/app/logs
 
