@@ -1,5 +1,6 @@
 const Queue = require('bull');
 const db = require('../services/database');
+const { pool } = require('../database/migrate');
 const evolutionAPI = require('../services/evolutionAPI');
 
 class BroadcastQueue {
@@ -121,7 +122,7 @@ class BroadcastQueue {
   }
 
   async getBroadcast(broadcastId) {
-    const result = await db.pool.query(
+    const result = await pool.query(
       'SELECT * FROM broadcasts WHERE id = $1',
       [broadcastId]
     );
@@ -129,7 +130,7 @@ class BroadcastQueue {
   }
 
   async getBroadcastRecipients(broadcastId) {
-    const result = await db.pool.query(`
+    const result = await pool.query(`
       SELECT br.id, c.phone_number, c.name
       FROM broadcast_recipients br
       JOIN contacts c ON br.contact_id = c.id

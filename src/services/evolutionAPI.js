@@ -4,21 +4,12 @@ class EvolutionAPIService {
   constructor() {
     this.baseUrl = process.env.EVOLUTION_API_URL;
     this.apiKey = process.env.EVOLUTION_API_KEY;
-    this.client = null;
 
-    this.init();
-  }
-
-  /**
-   * Initialize the Axios client
-   */
-  init() {
-    this.baseUrl = process.env.EVOLUTION_API_URL;
-    this.apiKey = process.env.EVOLUTION_API_KEY;
-
+    // Validate that required environment variables are present
     if (!this.baseUrl || !this.apiKey) {
       console.warn('⚠️ Warning: EVOLUTION_API_URL or EVOLUTION_API_KEY not set in environment variables');
-      return false;
+      this.client = null;
+      return;
     }
 
     this.client = axios.create({
@@ -30,31 +21,15 @@ class EvolutionAPIService {
         'Accept': 'application/json'
       }
     });
-    return true;
-  }
-
-  /**
-   * Ensure client is initialized before any request
-   */
-  ensureClient() {
-    if (!this.client) {
-      this.init();
-    }
-
-    if (!this.client) {
-      const missing = [];
-      if (!process.env.EVOLUTION_API_URL) missing.push('EVOLUTION_API_URL');
-      if (!process.env.EVOLUTION_API_KEY) missing.push('EVOLUTION_API_KEY');
-
-      throw new Error(`Evolution API client not initialized. Missing: ${missing.join(', ')}. Please check your environment variables.`);
-    }
   }
 
   /**
    * Create a new WhatsApp instance
    */
   async createInstance(instanceName, token) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       const response = await this.client.post('/instance/create', {
@@ -88,7 +63,9 @@ class EvolutionAPIService {
    * Get QR Code for an instance
    */
   async getQRCode(instanceName) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       const response = await this.client.get(`/instance/connect/${instanceName}`);
@@ -103,7 +80,9 @@ class EvolutionAPIService {
    * Check instance connection status
    */
   async getInstanceStatus(instanceName) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       const response = await this.client.get(`/instance/connectionState/${instanceName}`);
@@ -115,10 +94,32 @@ class EvolutionAPIService {
   }
 
   /**
+   * Check if a number is on WhatsApp and get its real JID
+   */
+  async checkNumber(instanceName, number) {
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized.');
+    }
+
+    try {
+      // In v2, this is often under /chat/checkNumberStatus/instanceName
+      const response = await this.client.post(`/chat/checkNumberStatus/${instanceName}`, {
+        numbers: [number]
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error checking number status:', error.response?.data || error.message);
+      return null;
+    }
+  }
+
+  /**
    * Logout and delete instance
    */
   async deleteInstance(instanceName) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       await this.client.delete(`/instance/logout/${instanceName}`);
@@ -133,38 +134,72 @@ class EvolutionAPIService {
   /**
    * Send text message
    */
-  async sendTextMessage(instanceName, phoneNumber, text) {
-    this.ensureClient();
+  async sendTextMessage(instanceName, remoteId, text) {
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized.');
+    }
 
     try {
-      const response = await this.client.post(`/message/sendText/${instanceName}`, {
-        number: phoneNumber,
+      const payload = {
+        number: remoteId,
         text: text
-      });
+      };
+
+      const response = await this.client.post(`/message/sendText/${instanceName}`, payload);
       return response.data;
     } catch (error) {
-      console.error('Error sending message:', error.response?.data || error.message);
+      console.error('Error sending text message:', error.response?.data || error.message);
       throw error;
     }
   }
 
-  /**
-   * Send media message (image/video)
-   */
+
   async sendMediaMessage(instanceName, phoneNumber, mediaUrl, caption, mediaType = 'image') {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized.');
+    }
 
     try {
-      const endpoint = mediaType === 'image' ? 'sendMedia' : 'sendMedia';
-      const response = await this.client.post(`/message/${endpoint}/${instanceName}`, {
+      console.log(`📡 Sending ${mediaType} to ${phoneNumber} via ${instanceName}...`);
+
+      const payload = {
         number: phoneNumber,
-        mediatype: mediaType,
+        mediatype: mediaType === 'document' ? 'document' : (mediaType === 'video' ? 'video' : 'image'),
         media: mediaUrl,
         caption: caption || ''
-      });
+      };
+
+      // v2 often requires mimetype for videos and documents
+      if (mediaType === 'video') {
+        payload.mimetype = 'video/mp4';
+      } else if (mediaType === 'image') {
+        payload.mimetype = 'image/jpeg';
+      } else if (mediaType === 'document') {
+        payload.mimetype = 'application/octet-stream';
+      }
+
+      // Try to refine mimetype if URL has extension
+      const lowerUrl = mediaUrl.toLowerCase();
+      if (lowerUrl.includes('.png')) payload.mimetype = mediaType === 'image' ? 'image/png' : payload.mimetype;
+      if (lowerUrl.includes('.webp')) payload.mimetype = mediaType === 'image' ? 'image/webp' : payload.mimetype;
+      if (lowerUrl.includes('.gif')) payload.mimetype = 'video/mp4'; // GIFs are often better as videos
+      if (lowerUrl.includes('.pdf')) payload.mimetype = 'application/pdf';
+
+      // If document, we can add a fileName
+      if (mediaType === 'document') {
+        payload.fileName = payload.fileName || 'File';
+      }
+
+      console.log(`📦 Media Payload:`, JSON.stringify(payload));
+      const response = await this.client.post(`/message/sendMedia/${instanceName}`, payload);
+      console.log(`✅ Media send success:`, JSON.stringify(response.data));
       return response.data;
     } catch (error) {
-      console.error('Error sending media:', error.response?.data || error.message);
+      console.error('❌ Error sending media:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message
+      });
       throw error;
     }
   }
@@ -173,7 +208,9 @@ class EvolutionAPIService {
    * Set webhook for instance
    */
   async setWebhook(instanceName, webhookUrl) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       const response = await this.client.post(`/webhook/set/${instanceName}`, {
@@ -200,7 +237,9 @@ class EvolutionAPIService {
    * Get instance info including phone number
    */
   async getInstanceInfo(instanceName) {
-    this.ensureClient();
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+    }
 
     try {
       const response = await this.client.get(`/instance/fetchInstances?instanceName=${instanceName}`);

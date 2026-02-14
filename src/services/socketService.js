@@ -8,7 +8,7 @@ class SocketService {
         this.apiServer = apiServer;
         this.telegramBot = telegramBot;
         this.pollingIntervals = new Map(); // Store intervals for each instance
-        this.processedMessages = new Set(); // To avoid duplicate processing
+        this.startTime = Math.floor(Date.now() / 1000); // Store bot startup time in seconds
     }
 
     /**
@@ -44,49 +44,45 @@ class SocketService {
         console.log(`📡 Starting Message Polling for ${instanceName}...`);
 
         const interval = setInterval(async () => {
-            // console.log(`🔄 Polling active for ${instanceName}...`);
             try {
-                // Fetch latest messages from Evolution API
-                if (!evolutionAPI.client) {
-                    throw new Error('Evolution API client not initialized');
-                }
-                const response = await evolutionAPI.client.get(`/chat/findMessages/${instanceName}?limit=10`);
+                // Fetch latest messages from Evolution API v2 using POST
+                const response = await evolutionAPI.client.post(`/chat/findMessages/${instanceName}`, {
+                    "paging": {
+                        "limit": 10,
+                        "offset": 0
+                    }
+                });
 
-                // Evolution API v2 puts messages in 'records' array
-                const messages = response.data?.records || response.data || [];
+                // Evolution API v2 puts messages in 'messages.records' array
+                const messages = response.data?.messages?.records || response.data?.records || response.data || [];
 
                 if (messages.length > 0) {
-                    // console.log(`🔍 Polling ${instanceName}: Found ${messages.length} message(s)`);
+                    // console.log(`🔍 [Polling] ${instanceName}: Found ${messages.length} message(s)`);
                 }
 
                 for (const message of messages) {
                     const messageId = message.key?.id;
 
-                    if (!messageId) continue;
+                    if (!messageId) {
+                        console.log(`⚠️ [Polling] Message missing key.id`, message);
+                        continue;
+                    }
 
-                    // Skip if message from me or already processed
-                    if (message.key?.fromMe || this.processedMessages.has(messageId)) {
+                    // Skip if from me or already processed globally
+                    if (message.key?.fromMe || this.apiServer.processedMessages.has(messageId)) {
+                        continue;
+                    }
+
+                    // Skip if message received before bot started
+                    const messageTimestamp = message.messageTimestamp || message.timestamp;
+                    if (messageTimestamp && messageTimestamp < this.startTime) {
+                        console.log(`⏭️ [Polling] Skipping old message: ${messageId}`);
                         continue;
                     }
 
                     console.log(`📥 NEW MESSAGE [Polling]: From ${message.key.remoteJid} - ID: ${messageId}`);
-
-                    // Process the message
-                    await this.apiServer.handleIncomingMessage(user, {
-                        event: 'messages.upsert',
-                        instance: instanceName,
-                        data: {
-                            messages: [message]
-                        }
-                    });
-
-                    // Mark as processed
-                    this.processedMessages.add(messageId);
-                    // Keep set size manageable
-                    if (this.processedMessages.size > 1000) {
-                        const firstItem = this.processedMessages.values().next().value;
-                        this.processedMessages.delete(firstItem);
-                    }
+                    // APIServer.handleIncomingMessage will now handle deduplication globally
+                    await this.apiServer.handleIncomingMessage(user, { messages: [message] });
                 }
             } catch (error) {
                 // Silent error for polling unless critical

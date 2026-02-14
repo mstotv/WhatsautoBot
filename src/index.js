@@ -5,35 +5,12 @@ const SocketService = require('./services/socketService');
 const BroadcastQueue = require('./services/broadcastQueue');
 const { migrate } = require('./database/migrate');
 
-// Environment check
-const requiredEnv = [
-  'TELEGRAM_BOT_TOKEN',
-  'EVOLUTION_API_URL',
-  'EVOLUTION_API_KEY',
-  'DATABASE_URL'
-];
-
 async function startApplication() {
   try {
     console.log('🚀 Starting WhatsApp Automation Bot...\n');
 
-    // Check for missing env vars
-    const missing = requiredEnv.filter(key => !process.env[key]);
-
-    // Debug: Log all found environment keys for troubleshooting
-    const foundKeys = Object.keys(process.env).filter(key =>
-      key.startsWith('EVOLUTION') || key.startsWith('TELEGRAM') || key.includes('DATABASE')
-    );
-    console.log(`🔍 Environment check: Found keys: ${foundKeys.join(', ')}`);
-
-    if (missing.length > 0) {
-      console.warn(`⚠️ Warning: Missing environment variables: ${missing.join(', ')}`);
-      console.warn('💡 If you are on Coolify/Docker, make sure to set these in the Dashboard.');
-    } else {
-      console.log('✅ Environment variables loaded.');
-    }
-
     // 1. Run database migrations
+    console.log('📊 Running database migrations...');
     await migrate();
     console.log('✅ Database ready\n');
 
