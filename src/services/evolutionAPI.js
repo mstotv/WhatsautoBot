@@ -154,7 +154,7 @@ class EvolutionAPIService {
   }
 
 
-  async sendMediaMessage(instanceName, phoneNumber, mediaUrl, caption, mediaType = 'image') {
+  async sendMediaMessage(instanceName, phoneNumber, mediaUrl, caption, mediaType = 'image', fileName = null) {
     if (!this.client) {
       throw new Error('Evolution API client not initialized.');
     }
@@ -162,10 +162,21 @@ class EvolutionAPIService {
     try {
       console.log(`📡 Sending ${mediaType} to ${phoneNumber} via ${instanceName}...`);
 
+      let finalMedia = mediaUrl;
+
+      // If mediaUrl is a local file path (not a URL), convert to base64
+      if (typeof mediaUrl === 'string' && !mediaUrl.startsWith('http')) {
+        const fs = require('fs');
+        if (fs.existsSync(mediaUrl)) {
+          const fileBuffer = fs.readFileSync(mediaUrl);
+          finalMedia = fileBuffer.toString('base64');
+        }
+      }
+
       const payload = {
         number: phoneNumber,
         mediatype: mediaType === 'document' ? 'document' : (mediaType === 'video' ? 'video' : 'image'),
-        media: mediaUrl,
+        media: finalMedia,
         caption: caption || ''
       };
 
@@ -187,7 +198,7 @@ class EvolutionAPIService {
 
       // If document, we can add a fileName
       if (mediaType === 'document') {
-        payload.fileName = payload.fileName || 'File';
+        payload.fileName = fileName || payload.fileName || 'Invoice.pdf';
       }
 
       console.log(`📦 Media Payload:`, JSON.stringify(payload));
@@ -246,6 +257,34 @@ class EvolutionAPIService {
       return response.data;
     } catch (error) {
       console.error('Error getting instance info:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Download media from a message (v2 compatible)
+   */
+  async downloadMedia(instanceName, message) {
+    if (!this.client) {
+      throw new Error('Evolution API client not initialized.');
+    }
+
+    try {
+      // Evolution API v2 uses getBase64FromMediaMessage and expects { message: messageObj }
+      const response = await this.client.post(`/chat/getBase64FromMediaMessage/${instanceName}`, { message });
+
+      // The response usually contains { base64: "..." }
+      const base64Data = response.data.base64 || response.data;
+
+      if (typeof base64Data === 'string') {
+        return Buffer.from(base64Data, 'base64');
+      }
+
+      return base64Data; // Already a buffer or something else
+    } catch (error) {
+      const errorData = error.response?.data;
+      const errorMessage = typeof errorData === 'object' ? JSON.stringify(errorData) : errorData;
+      console.error('Error downloading media:', errorMessage || error.message);
       throw error;
     }
   }

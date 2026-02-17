@@ -2,451 +2,100 @@ const { Markup } = require('telegraf');
 const db = require('../services/database');
 const { t } = require('./i18n');
 const axios = require('axios');
+const aiService = require('../services/aiService');
+const sheetsService = require('../services/sheetsService');
+const evolutionAPI = require('../services/evolutionAPI');
+const excelService = require('../services/excelService');
+const fs = require('fs');
 
 // AI Settings Handler
 async function showAISettings(ctx) {
   const user = await db.getUserByTelegramId(ctx.from.id);
   const aiSettings = await db.getAISettings(user.id);
 
-  let message = '🤖 إعدادات الذكاء الاصطناعي\n\n';
+  let message = '🧠 <b>إعدادات الذكاء الاصطناعي</b>\n\n';
+  message += '━━━━━━━━━━━━━━━\n';
 
   if (aiSettings && aiSettings.is_active) {
-    message += `✅ الحالة: مفعّل (${aiSettings.provider === 'deepseek' ? 'DeepSeek' : 'Gemini'})\n`;
-    message += `📝 الموديل: ${aiSettings.model || 'Default'}\n\n`;
-    message += 'عند تفعيل الذكاء الاصطناعي، سيرد على جميع الرسائل تلقائياً.';
+    message += `✅ <b>الحالة:</b> مفعل\n`;
+    message += `🔗 <b>المزود:</b> ChatGPT (OpenAI)\n`;
+    message += `🌐 <b>اللغة:</b> ${aiSettings.language || 'ar'}\n`;
+    if (aiSettings.system_prompt) {
+      const prompt = aiSettings.system_prompt.substring(0, 100);
+      message += `📝 <b>التعليمات:</b> ${prompt}...\n`;
+    }
   } else {
-    message += '❌ الذكاء الاصطناعي غير مفعّل\n\n';
-    message += 'اختر أحد المزودين للبدء:';
+    message += '❌ <b>الحالة:</b> غير مفعل\n';
   }
 
-  const buttons = [];
+  message += '\n━━━━━━━━━━━━━━━\n';
+  message += '🔔 <b>الإشعارات:</b> ' + (user.notifications_enabled !== false ? '✅ مفعلة' : '❌ معطلة') + '\n';
+  message += '━━━━━━━━━━━━━━━\n\n';
+  message += 'اختر المزود أو الإعداد:';
 
-  if (!aiSettings || !aiSettings.is_active) {
-    buttons.push([Markup.button.callback('🔧 إعداد DeepSeek API', 'setup_ai')]);
-    buttons.push([Markup.button.callback('🔧 إعداد Google Gemini', 'setup_gemini')]);
-  } else {
-    buttons.push([aiSettings.provider === 'deepseek'
-      ? Markup.button.callback('⚙️ تعديل DeepSeek', 'setup_ai')
-      : Markup.button.callback('⚙️ تعديل Gemini', 'setup_gemini')
-    ]);
-    buttons.push([Markup.button.callback('🧠 تدريب البوت (التعليمات)', 'train_ai')]);
-    buttons.push([Markup.button.callback('❌ تعطيل AI', 'disable_ai')]);
+  const buttons = [
+    [Markup.button.callback('⚪ إعداد ChatGPT (OpenAI)', 'setup_chatgpt')],
+    [Markup.button.callback('🧠 تدريب الذكاء', 'train_ai')],
+    [Markup.button.callback(user.notifications_enabled !== false ? '🔕 إيقاف الإشعارات' : '🔔 تفعيل الإشعارات', 'toggle_notifications')]
+  ];
 
-    // Add option to switch provider
-    if (aiSettings.provider === 'deepseek') {
-      buttons.push([Markup.button.callback('🔄 التغيير إلى Gemini', 'setup_gemini')]);
-    } else {
-      buttons.push([Markup.button.callback('🔄 التغيير إلى DeepSeek', 'setup_ai')]);
-    }
+  if (aiSettings && aiSettings.is_active) {
+    buttons.push([Markup.button.callback('❌ تعطيل الذكاء', 'disable_ai')]);
   }
 
   buttons.push([Markup.button.callback('🔙 العودة', 'back_dashboard')]);
 
-  await ctx.reply(message, Markup.inlineKeyboard(buttons));
+  await ctx.reply(message, {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons }
+  });
 }
 
-// Setup AI
-async function handleSetupAI(ctx, telegramBot) {
+// Setup AI (DeepSeek)
+
+// Setup Gemini
+
+// Setup ChatGPT (OpenAI)
+async function handleSetupChatGPT(ctx, telegramBot) {
   const state = telegramBot.userStates.get(ctx.from.id);
 
-  if (!state) {
-    telegramBot.userStates.set(ctx.from.id, { action: 'setup_ai', step: 'api_key' });
-    await ctx.reply('🔑 أرسل API Key من DeepSeek:\n\n(يمكنك الحصول عليه من: https://platform.deepseek.com)');
+  if (!state || state.action !== 'setup_chatgpt') {
+    telegramBot.userStates.set(ctx.from.id, { action: 'setup_chatgpt', step: 'api_key' });
+    await ctx.reply('🔑 <b>أرسل API Key من OpenAI</b>\n\n' +
+      'يمكنك الحصول عليه من: https://platform.openai.com/api-keys',
+      { parse_mode: 'HTML' });
     return;
   }
 
   if (state.step === 'api_key' && ctx.message) {
     state.apiKey = ctx.message.text;
-    state.step = 'system_prompt';
+    state.step = 'language';
     telegramBot.userStates.set(ctx.from.id, state);
-    await ctx.reply('📝 اختياري: أرسل التعليمات للذكاء الاصطناعي (System Prompt)\n\nأو أرسل "تخطي" للاستخدام الافتراضي:');
-  } else if (state.step === 'system_prompt') {
-    const systemPrompt = ctx.message.text === 'تخطي'
-      ? 'أنت مساعد ذكي ومفيد. أجب على الأسئلة بطريقة واضحة ومهذبة.'
-      : ctx.message.text;
-
-    const user = await db.getUserByTelegramId(ctx.from.id);
-    await db.setAISettings(user.id, 'deepseek', state.apiKey, 'deepseek-chat', systemPrompt);
-
-    telegramBot.userStates.delete(ctx.from.id);
-    await ctx.reply('✅ تم حفظ إعدادات الذكاء الاصطناعي بنجاح!\n\nسيتم الرد تلقائياً على جميع الرسائل الواردة.');
-    await showAISettings(ctx);
-  }
-}
-
-async function handleAddAutoReply(ctx, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  if (!state) return;
-
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  const lang = user.language || 'ar';
-
-  // Step 1: Handle Keyword
-  if (state.step === 'keyword' && ctx.message) {
-    state.keyword = ctx.message.text.toLowerCase();
-    state.step = 'reply_text';
-    telegramBot.userStates.set(ctx.from.id, state);
-
-    const msg = lang === 'ar' ? `✅ الكلمة المفتاحية: "${state.keyword}"\n\n📝 الآن أرسل الرد التلقائي:` : `✅ Keyword: "${state.keyword}"\n\n📝 Now send the reply text:`;
-    await ctx.reply(msg);
-    return;
-  }
-
-  // Step 2: Handle Reply Text
-  if (state.step === 'reply_text' && ctx.message) {
-    state.replyText = ctx.message.text;
-    state.step = 'media_type';
-    telegramBot.userStates.set(ctx.from.id, state);
-
-    await ctx.reply(
-      t('media_prompt', lang),
-      Markup.inlineKeyboard([
-        [Markup.button.callback(t('media_type_image', lang), 'media_type_image')],
-        [Markup.button.callback(t('media_type_video', lang), 'media_type_video')],
-        [Markup.button.callback(t('media_type_document', lang), 'media_type_document')],
-        [Markup.button.callback(t('media_type_none', lang), 'media_type_none')]
-      ])
-    );
-    return;
-  }
-
-  // Step 3: Handle Media Upload
-  if (state.step === 'media_upload') {
-    let mediaUrl = null;
-    let mediaType = state.pendingMediaType;
-
-    try {
-      if (ctx.message.photo) {
-        const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        const file = await ctx.telegram.getFile(fileId);
-        mediaUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-        mediaType = 'image';
-      } else if (ctx.message.video || ctx.message.animation) {
-        const media = ctx.message.video || ctx.message.animation;
-
-        // Pre-check file size (Telegram getFile limit is 20MB)
-        if (media.file_size > 20 * 1024 * 1024) {
-          const errorMsg = lang === 'ar' ? '⚠️ حجم الفيديو كبير جداً (أكبر من 20 ميجابايت).' : '⚠️ Video size is too large (greater than 20MB).';
-          await ctx.reply(errorMsg);
-          return;
-        }
-
-        const fileId = media.file_id;
-        const file = await ctx.telegram.getFile(fileId);
-        mediaUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-        mediaType = 'video';
-      } else if (ctx.message.document) {
-        if (ctx.message.document.file_size > 20 * 1024 * 1024) {
-          const errorMsg = lang === 'ar' ? '⚠️ حجم الملف كبير جداً (أكبر من 20 ميجابايت).' : '⚠️ File size is too large (greater than 20MB).';
-          await ctx.reply(errorMsg);
-          return;
-        }
-        const fileId = ctx.message.document.file_id;
-        const file = await ctx.telegram.getFile(fileId);
-        mediaUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-        mediaType = 'document';
-      } else if (ctx.message.text && ctx.message.text.startsWith('http')) {
-        mediaUrl = ctx.message.text;
-      } else {
-        const errorMsg = lang === 'ar' ? '❌ الرجاء إرسال الملف المطلوب أو رابط مباشر يبدأ بـ http' : '❌ Please send the required file or a direct link starting with http';
-        await ctx.reply(errorMsg);
-        return;
-      }
-
-      console.log(`💾 Saving auto-reply with media: keyword=${state.keyword}, type=${mediaType}, url=${mediaUrl}`);
-      await db.addAutoReply(user.id, state.keyword, state.replyText, mediaUrl, mediaType);
-
-      telegramBot.userStates.delete(ctx.from.id);
-      await ctx.reply(t('save_success', lang));
-      if (telegramBot.showAutoRepliesMenu) await telegramBot.showAutoRepliesMenu(ctx);
-      return;
-    } catch (error) {
-      console.error('Error getting file from Telegram:', error);
-      if (error.description && error.description.includes('file is too big')) {
-        await ctx.reply('⚠️ عذراً، هذا الملف كبير جداً بالنسبة لتليجرام للتعامل معه عبر البوت. الرجاء استخدام رابط مباشر أو تقليل حجم الملف.');
-      } else {
-        await ctx.reply('❌ حدث خطأ أثناء معالجة الملف. الرجاء المحاولة مرة أخرى أو استخدام رابط مباشر.');
-      }
-      return;
-    }
-  }
-
-  // Step 4: Handle Direct URL Input
-  if (state.step === 'media_url_input' && ctx.message.text) {
-    const url = ctx.message.text.trim();
-    if (!url.startsWith('http')) {
-      await ctx.reply('❌ الرجاء إرسال رابط مباشر صحيح يبدأ بـ http');
-      return;
-    }
-
-    state.mediaUrl = url;
-    state.step = 'media_url_type';
-    telegramBot.userStates.set(ctx.from.id, state);
-
-    await ctx.reply(
-      '🔗 تم استلام الرابط. ما هو نوع الوسائط الموجود في هذا الرابط؟',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('🖼️ صورة', 'url_type_image')],
-        [Markup.button.callback('🎥 فيديو', 'url_type_video')],
-        [Markup.button.callback('📂 ملف / مستند', 'url_type_document')]
-      ])
-    );
-    return;
-  }
-
-  // Step 5: Handle URL Type Selection (via Button in telegram.js)
-}
-
-/**
- * Handle the final step of URL-based auto-reply
- */
-async function handleURLTypeSelection(ctx, type, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  if (!state || state.step !== 'media_url_type') return;
-
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  const mediaType = type; // 'image', 'video', or 'document'
-  const mediaUrl = state.mediaUrl;
-
-  console.log(`💾 Saving URL auto-reply: keyword=${state.keyword}, type=${mediaType}, url=${mediaUrl}`);
-  await db.addAutoReply(user.id, state.keyword, state.replyText, mediaUrl, mediaType);
-
-  telegramBot.userStates.delete(ctx.from.id);
-
-  const typeLabel = mediaType === 'image' ? '🖼️ صورة' : (mediaType === 'video' ? '🎥 فيديو' : '📂 ملف/مستند');
-  await ctx.reply(`✅ تم حفظ الرد التلقائي بنجاح!\n\n🔗 الرابط: ${mediaUrl}\n📂 النوع: ${typeLabel}`);
-
-  if (telegramBot.showAutoRepliesMenu) await telegramBot.showAutoRepliesMenu(ctx);
-}
-
-// Finalize Auto-Reply without media
-async function finishAutoReply(ctx, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  if (!state) return;
-
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  await db.addAutoReply(user.id, state.keyword, state.replyText, null, null);
-
-  telegramBot.userStates.delete(ctx.from.id);
-  await ctx.reply('✅ تم حفظ الرد التلقائي بنجاح!');
-  if (telegramBot.showAutoRepliesMenu) await telegramBot.showAutoRepliesMenu(ctx);
-}
-
-/**
- * Handle language selection
- */
-async function handleSetLanguage(ctx, lang, telegramBot) {
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  await db.setUserLanguage(user.id, lang);
-
-  await ctx.reply(t('language_changed', lang));
-  await telegramBot.showDashboard(ctx);
-}
-
-// Train AI (Update System Prompt)
-async function handleTrainAI(ctx, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  const aiSettings = await db.getAISettings(user.id);
-
-  if (!state) {
-    // First time - show training menu
-    const currentPrompt = aiSettings?.system_prompt || '';
-    
-    let message = '🧠 <b> تدريب الذكاء الاصطناعي </b>\n\n';
-    message += '━━━━━━━━━━━━━━━━━━━━━\n';
-    message += '📝 <b>التعليمات الحالية:</b>\n';
-    message += currentPrompt ? `"${currentPrompt}"` : 'لا توجد تعليمات مخصصة';
-    message += '\n\n━━━━━━━━━━━━━━━━━━━━━\n';
-    message += '⚙️ <b>اختر نوع التدريب:</b>\n\n';
-    message += '1️⃣ <b>تعليمات بسيطة</b> - كتابة جملة واحدة تصف دور البوت\n';
-    message += '2️⃣ <b>تدريب متقدم</b> - إضافة قواعد و شروط مفصلة\n';
-    message += '3️⃣ <b>تحسين الرد</b> - إعادة كتابة رد الذكاء الاصطناعي بشكل أفضل\n';
-    message += '4️⃣ <b>اختبار الذكاء</b> - تجربة الذكاء الاصطناعي';
-
-    await ctx.reply(message, {
-      parse_mode: 'HTML',
+    await ctx.reply('🌐 اختر لغة الذكاء الاصطناعي:', {
       reply_markup: {
         inline_keyboard: [
-          [Markup.button.callback('1️⃣ تعليمات بسيطة', 'train_simple')],
-          [Markup.button.callback('2️⃣ تدريب متقدم', 'train_advanced')],
-          [Markup.button.callback('3️⃣ تحسين الرد', 'enhance_response')],
-          [Markup.button.callback('4️⃣ اختبار الذكاء', 'test_ai')],
-          [Markup.button.callback('🔙 رجوع', 'ai_settings')]
+          [Markup.button.callback('🇸🇦 العربية', 'ai_lang_ar')],
+          [Markup.button.callback('🇺🇸 English', 'ai_lang_en')],
+          [Markup.button.callback('🇫🇷 Français', 'ai_lang_fr')],
+          [Markup.button.callback('🇩🇪 Deutsch', 'ai_lang_de')]
         ]
       }
     });
-    return;
-  }
-
-  if (state.step === 'simple_prompt') {
-    if (!aiSettings) {
-      await ctx.reply('❌ يجب إعداد DeepSeek API أولاً قبل التدريب.');
-      telegramBot.userStates.delete(ctx.from.id);
-      return;
-    }
-
-    const simplePrompt = ctx.message.text;
-    // Create a more detailed prompt from simple input
-    const detailedPrompt = `أنت ${simplePrompt}. 
-
-📋 <strong>القواعد:</strong>
-- ابرد بإجابات قصيرة و مختصرة
-- لا تكتب كلام كثير
-- أجب على حسب السؤال مباشرة
-- استخدم لغة عربية فصحى مفهومة
-- إذا سألوك عن سعر، اذكر السعر مباشرة
-- إذا سألوك عن موعد، اذكر التاريخ مباشرة
-- لا تضيف تعليقات غير ضرورية`;
-
-    await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, detailedPrompt);
-
-    telegramBot.userStates.delete(ctx.from.id);
-    await ctx.reply('✅ <b>تم التدريب بنجاح!</b>\n\n📝 التعليمات المضافة:\n' + detailedPrompt, { parse_mode: 'HTML' });
-    await showAISettings(ctx);
-  }
-
-  if (state.step === 'advanced_prompt') {
-    if (!aiSettings) {
-      await ctx.reply('❌ يجب إعداد DeepSeek API أولاً قبل التدريب.');
-      telegramBot.userStates.delete(ctx.from.id);
-      return;
-    }
-
-    await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, ctx.message.text);
-
-    telegramBot.userStates.delete(ctx.from.id);
-    await ctx.reply('✅ <b>تم تحديث التدريب المتقدم بنجاح!</b>\n\nسيتم الرد على الرسائل حسب التعليمات الجديدة.', { parse_mode: 'HTML' });
-    await showAISettings(ctx);
-  }
-
-  if (state.step === 'enhance_prompt') {
-    if (!aiSettings) {
-      await ctx.reply('❌ يجب إعداد DeepSeek API أولاً.');
-      telegramBot.userStates.delete(ctx.from.id);
-      return;
-    }
-
-    // Get AI to enhance the text
-    const enhancePrompt = `راجع و حسّن النص التالي جعله أكثر احترافية و إجابات قصيرة و مختصرة:
-
-"${ctx.message.text}"
-
-أعد كتابة النص فقط بدون إضافة تعليقات.`;
-
-    try {
-      const { default: axios } = require('axios');
-      const response = await axios.post(
-        'https://api.deepseek.com/v1/chat/completions',
-        {
-          model: aiSettings.model || 'deepseek-chat',
-          messages: [
-            { role: 'system', content: 'أنت مساعد عربي محترف. أعد كتابة النصوص بأسلوب أفضل وأقصر.' },
-            { role: 'user', content: enhancePrompt }
-          ],
-          temperature: 0.7,
-          max_tokens: 500
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${aiSettings.api_key}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      const enhancedText = response.data.choices[0].message.content;
-      
-      await ctx.reply('✨ <b>النص المحسّن:</b>\n\n' + enhancedText, { parse_mode: 'HTML' });
-      await ctx.reply('هل تريد حفظ هذا النص كتعليمات للذكاء الاصطناعي؟', {
-        reply_markup: {
-          inline_keyboard: [
-            [Markup.button.callback('✅ نعم، حفظ', 'save_enhanced_' + encodeURIComponent(enhancedText))],
-            [Markup.button.callback('❌ لا', 'train_ai')]
-          ]
-        }
-      });
-    } catch (error) {
-      console.error('Error enhancing text:', error.message);
-      await ctx.reply('❌ حدث خطأ أثناء تحسين النص. يرجى المحاولة مرة أخرى.');
-    }
-
-    telegramBot.userStates.delete(ctx.from.id);
-  }
-
-  if (state.step === 'test_ai_input') {
-    if (!aiSettings) {
-      await ctx.reply('❌ يجب إعداد DeepSeek API أولاً.');
-      telegramBot.userStates.delete(ctx.from.id);
-      return;
-    }
-
-    try {
-      const { default: axios } = require('axios');
-      const response = await axios.post(
-        'https://api.deepseek.com/v1/chat/completions',
-        {
-          model: aiSettings.model || 'deepseek-chat',
-          messages: [
-            { role: 'system', content: aiSettings.system_prompt || 'أنت مساعد عربي مفيد.' },
-            { role: 'user', content: ctx.message.text }
-          ],
-          temperature: 0.7,
-          max_tokens: 500
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${aiSettings.api_key}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      const aiReply = response.data.choices[0].message.content;
-      
-      await ctx.reply('🤖 <b>رد الذكاء الاصطناعي:</b>\n\n' + aiReply, { parse_mode: 'HTML' });
-      await ctx.reply('هل تريد تجربة أخرى؟', {
-        reply_markup: {
-          inline_keyboard: [
-            [Markup.button.callback('🔄 تجربة أخرى', 'test_ai')],
-            [Markup.button.callback('🔙 رجوع', 'train_ai')]
-          ]
-        }
-      });
-    } catch (error) {
-      console.error('Error testing AI:', error.message);
-      await ctx.reply('❌ حدث خطأ. تأكد من صحة API Key.');
-    }
-
-    telegramBot.userStates.delete(ctx.from.id);
-  }
-}
-
-// Setup Gemini
-async function handleSetupGemini(ctx, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-
-  if (!state || state.action !== 'setup_gemini') {
-    telegramBot.userStates.set(ctx.from.id, { action: 'setup_gemini', step: 'api_key' });
-    await ctx.reply('🔑 أرسل API Key من Google AI Studio:\n\n(يمكنك الحصول عليه من: https://aistudio.google.com/app/apikey)');
-    return;
-  }
-
-  if (state.step === 'api_key' && ctx.message) {
-    state.apiKey = ctx.message.text;
-    state.step = 'system_prompt';
-    telegramBot.userStates.set(ctx.from.id, state);
-    await ctx.reply('📝 اختياري: أرسل التعليمات للذكاء الاصطناعي (System Prompt)\n\nأو أرسل "تخطي" للاستخدام الافتراضي:');
   } else if (state.step === 'system_prompt') {
-    const systemPrompt = ctx.message.text === 'تخطي'
-      ? 'أنت مساعد ذكي ومفيد. أجب على الأسئلة بطريقة واضحة ومهذبة.'
-      : ctx.message.text;
+    const systemPrompt = ctx.message.text;
 
     const user = await db.getUserByTelegramId(ctx.from.id);
-    await db.setAISettings(user.id, 'gemini', state.apiKey, 'gemini-flash-latest', systemPrompt);
+    const lang = state.language || 'ar';
+    await db.setAISettings(user.id, 'chatgpt', state.apiKey, 'gpt-4o-mini', systemPrompt, lang);
 
     telegramBot.userStates.delete(ctx.from.id);
-    await ctx.reply('✅ تم حفظ إعدادات Google Gemini بنجاح!\n\nسيتم الرد تلقائياً على جميع الرسائل الواردة باستخدام Gemini.');
+
+    const langNames = { ar: 'العربية', en: 'English', fr: 'Français', de: 'Deutsch' };
+    await ctx.reply('✅ <b>تم حفظ إعدادات ChatGPT بنجاح!</b>\n\n' +
+      '🔗 المزود: ChatGPT (OpenAI)\n' +
+      '🌐 اللغة: ' + (langNames[lang] || lang) + '\n' +
+      '🤖 سيتم الرد تلقائياً على جميع الرسائل الواردة باستخدام ChatGPT.',
+      { parse_mode: 'HTML' });
     await showAISettings(ctx);
   }
 }
@@ -459,34 +108,338 @@ async function disableAI(ctx) {
   await showAISettings(ctx);
 }
 
-// Working Hours Menu
-async function showWorkingHoursMenu(ctx) {
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  const workingHours = await db.getWorkingHours(user.id);
+// Handle Google Sheets Setup
+async function handleSheetsSetup(ctx, telegramBot) {
+  const state = telegramBot.userStates.get(ctx.from.id);
+  const googleAuthService = require('../services/googleAuthService');
+  const globalOAuth = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  const globalCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
-  let message = '⏰ أوقات العمل\n\n';
+  if (!state || state.action !== 'setup_sheets') {
+    // Check if user is already OAuth authorized
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const sheetsSettings = await db.getSheetsSettings(user.id);
 
-  if (workingHours.length === 0) {
-    message += '❌ لم يتم تحديد أوقات عمل بعد\n\n';
-    message += 'عند تحديد أوقات العمل، سيتم إرسال رسالة تلقائية خارج هذه الأوقات.';
-  } else {
-    const days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
-    workingHours.forEach(wh => {
-      message += `📅 ${days[wh.day_of_week]}: ${wh.start_time} - ${wh.end_time}\n`;
-    });
+    if (globalOAuth && (!sheetsSettings || !sheetsSettings.access_token)) {
+      const authUrl = googleAuthService.generateAuthUrl(ctx.from.id);
+      console.log(`🔗 Generated Auth URL for user ${ctx.from.id}: ${authUrl}`);
+
+      // Set state even before login so it's ready when they come back
+      telegramBot.userStates.set(ctx.from.id, { action: 'setup_sheets', step: 'spreadsheet_url' });
+
+      await ctx.reply(
+        '📊 <b>ربط Google Sheets (الربط المباشر)</b>\n\n' +
+        'اضغط على الزر أدناه لتسجيل الدخول بحساب جوجل ومنح البوت صلاحية الوصول لملفاتك لكي يتمكن من تسجيل الطلبات آلياً.\n\n' +
+        '✨ <b>مميزات الربط المباشر:</b>\n' +
+        '• لا حاجة لنسخ ملفات JSON.\n' +
+        '• لا حاجة لمشاركة الملف يدوياً.\n' +
+        '• الربط يتم بضغطة زر واحدة.\n\n' +
+        '⚠️ <b>ملاحظة للمطور:</b> إذا واجهت خطأ redirect_uri_mismatch، تأكد أنك أضفت هذا الرابط في Google Console:\n' +
+        `<code>${googleAuthService.redirectUri}</code>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[Markup.button.url('👤 تسجيل الدخول بجوجل', authUrl)]]
+          }
+        }
+      );
+      return;
+    }
+
+    telegramBot.userStates.set(ctx.from.id, { action: 'setup_sheets', step: 'spreadsheet_url' });
+
+    let message = '📊 <b>إكمال إعداد Google Sheets</b>\n\n';
+
+    if (sheetsSettings && sheetsSettings.auth_type === 'oauth2') {
+      message += '✅ حساب جوجل مرتبطة.\n\n';
+      message += '📝 أرسل الآن رابط ملف الإكسل (URL) الذي تريد استخدامه للطلبات:';
+    } else if (globalCreds) {
+      try {
+        const creds = JSON.parse(globalCreds);
+        message += `✅ نظام الربط السهل مفعل.\n\n`;
+        message += `1️⃣ قم بمشاركة الشيت الخاص بك مع هذا البريد:\n<code>${creds.client_email}</code>\n(أعطه صلاحية Editor)\n\n`;
+        message += `2️⃣ أرسل رابط الشيت (URL) هنا مباشرة.\n`;
+      } catch (e) {
+        message += `⚠️ خطأ في إعدادات النظام العالمية. سيتم استخدام الطريقة اليدوية.\n\n`;
+        message += `أرسل Spreadsheet ID الخاص بك:`;
+      }
+    } else {
+      message += '1️⃣ أنشئ مشروع في Google Cloud Console\n' +
+        '2️⃣ فعّل Google Sheets API\n' +
+        '3️⃣ أنشئ Service Account وحمّل ملف JSON\n' +
+        '4️⃣ شارك الشيت مع إيميل الـ Service Account\n\n' +
+        '━━━━━━━━━━━━━━━\n' +
+        '📝 أرسل Spreadsheet ID:';
+    }
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+    return;
   }
 
-  await ctx.reply(message, Markup.inlineKeyboard([
-    [Markup.button.callback('➕ إضافة/تعديل أوقات', 'add_working_hours')],
-    [Markup.button.callback('📋 عرض الرسالة الحالية', 'view_hours_message')],
-    [Markup.button.callback('🔙 العودة', 'back_dashboard')]
-  ]));
+  if (state.step === 'spreadsheet_url' && ctx.message) {
+    let input = ctx.message.text.trim();
+    let spreadsheetId = input;
+
+    // Extract ID from URL if provided
+    const urlMatch = input.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (urlMatch) {
+      spreadsheetId = urlMatch[1];
+    }
+
+    state.spreadsheetId = spreadsheetId;
+
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const sheetsSettings = await db.getSheetsSettings(user.id);
+
+    if (sheetsSettings && sheetsSettings.auth_type === 'oauth2') {
+      state.credentials = {
+        access_token: sheetsSettings.access_token,
+        refresh_token: sheetsSettings.refresh_token,
+        token_expiry: sheetsSettings.token_expiry,
+        auth_type: 'oauth2'
+      };
+      state.step = 'test';
+      telegramBot.userStates.set(ctx.from.id, state);
+      return handleSheetsTest(ctx, state, telegramBot);
+    } else if (globalCreds) {
+      state.credentials = globalCreds;
+      state.step = 'test';
+      telegramBot.userStates.set(ctx.from.id, state);
+      return handleSheetsTest(ctx, state, telegramBot);
+    } else {
+      state.step = 'credentials';
+      telegramBot.userStates.set(ctx.from.id, state);
+      await ctx.reply(
+        '📄 الآن أرسل محتوى ملف credentials JSON:\n\n' +
+        '(الصق كل محتوى ملف JSON الذي حملته من Google Cloud)',
+        { parse_mode: 'HTML' }
+      );
+    }
+  } else if (state.step === 'credentials' && ctx.message) {
+    try {
+      JSON.parse(ctx.message.text);
+      state.credentials = ctx.message.text;
+      state.step = 'test';
+      telegramBot.userStates.set(ctx.from.id, state);
+      await handleSheetsTest(ctx, state, telegramBot);
+    } catch (e) {
+      await ctx.reply('❌ JSON غير صحيح. تأكد من لصق كامل محتوى ملف credentials.');
+    }
+  }
+}
+
+// Helper to test and initialize
+async function handleSheetsTest(ctx, state, telegramBot) {
+  try {
+    await ctx.reply('⏳ جاري اختبار الاتصال وتجهيز الجداول...');
+    const testResult = await sheetsService.testConnection(state.credentials, state.spreadsheetId);
+
+    if (testResult.success) {
+      // Initialize Tabs (الطلبات والمنتجات)
+      const initResult = await sheetsService.initializeSheet(state.credentials, state.spreadsheetId);
+
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      await db.setSheetsSettings(
+        user.id,
+        state.spreadsheetId,
+        typeof state.credentials === 'string' ? state.credentials : null,
+        'المنتجات!A:Z',
+        'الطلبات!A:A'
+      );
+
+      telegramBot.userStates.delete(ctx.from.id);
+
+      let successMsg = '🎊 <b>مبروك! تم تأكيد ربط ملف الإكسل بنجاح</b> ✨\n\n';
+      successMsg += `� <b>اسم الملف:</b> <code>${testResult.title}</code>\n`;
+      successMsg += `📊 <b>الحالة:</b> متصل وجاهز للعمل\n\n`;
+
+      if (initResult.success) {
+        successMsg += `✅ تم إنشاء وتجهيز صفحات "الطلبات" و "المنتجات" داخل الملف آلياً.\n`;
+      } else {
+        successMsg += `⚠️ تم الربط، ولكن يرجى التأكد من وجود صفحات باسم "الطلبات" و "المنتجات".\n`;
+      }
+
+      successMsg += `\n🚀 <b>النظام الآن جاهز!</b> أي طلب يتم اكتشافه عبر الواتساب سيتم تسجيله فوراً في هذا الملف.`;
+
+      await ctx.reply(successMsg, { parse_mode: 'HTML' });
+      await showAISettings(ctx);
+    } else {
+      await ctx.reply('❌ فشل الاتصال: ' + testResult.error + '\n\nتأكد من مشاركة الشيت مع البريد الإلكتروني الصحيح أو تسجيل الدخول بشكل صحيح.');
+      telegramBot.userStates.delete(ctx.from.id);
+    }
+  } catch (error) {
+    console.error('Error in handleSheetsTest:', error);
+    await ctx.reply('❌ حدث خطأ غير متوقع أثناء إعداد الشيت.');
+    telegramBot.userStates.delete(ctx.from.id);
+  }
+}
+
+// Toggle notifications
+async function handleToggleNotifications(ctx) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+  const newState = user.notifications_enabled === false ? true : false;
+  await db.toggleNotifications(ctx.from.id, newState);
+  await ctx.reply(newState ? '🔔 تم تفعيل الإشعارات' : '🔕 تم إيقاف الإشعارات');
+  await showAISettings(ctx);
+}
+
+// Train AI
+async function handleTrainAI(ctx, telegramBot) {
+  const state = telegramBot.userStates.get(ctx.from.id);
+  const user = await db.getUserByTelegramId(ctx.from.id);
+  const aiSettings = await db.getAISettings(user.id);
+
+  if (!state) {
+    const currentPrompt = aiSettings?.system_prompt || '';
+
+    let message = '🧠 تدريب الذكاء الاصطناعي\n\n';
+    message += '📝 التعليمات الحالية: ' + (currentPrompt || 'لا توجد');
+    message += '\n\nاختر نوع التدريب:\n';
+    message += '1️⃣ تعليمات بسيطة\n';
+    message += '2️⃣ تدريب متقدم\n';
+    message += '3️⃣ تحسين الرد\n';
+    message += '4️⃣ اختبار الذكاء';
+
+    await ctx.reply(message, {
+      reply_markup: {
+        inline_keyboard: [
+          [Markup.button.callback('1️⃣ تعليمات بسيطة', 'train_simple')],
+          [Markup.button.callback('2️⃣ تدريب متقدم', 'train_advanced')],
+          [Markup.button.callback('3️⃣ تحسين الرد', 'enhance_response')],
+          [Markup.button.callback('4️⃣ اختبار الذكاء', 'test_ai')],
+          [Markup.button.callback('🔙 العودة', 'ai_settings')]
+        ]
+      }
+    });
+    return;
+  }
+
+  if (state.step === 'simple_prompt') {
+    if (!aiSettings) {
+      await ctx.reply('❌ يجب إعداد DeepSeek أولاً.');
+      telegramBot.userStates.delete(ctx.from.id);
+      return;
+    }
+
+    const simplePrompt = ctx.message.text;
+    const userLang = aiSettings.language || 'ar';
+
+    const detailedPrompts = {
+      ar: 'أنت ' + simplePrompt + '. أجب بشكل مفصّل وواضح. اكتب فقرات كاملة. اجعل إجاباتك شاملة ومفيدة.',
+      en: 'You are ' + simplePrompt + '. Answer in detail and clearly. Write full paragraphs. Make your answers comprehensive.',
+      fr: 'Vous êtes ' + simplePrompt + '. Répondez en détail. Écrivez des paragraphes entiers. Soyez complet.',
+      de: 'Sie sind ' + simplePrompt + '. Antworten Sie detailliert. Schreiben Sie vollständige Absätze. Seien Sie umfassend.'
+    };
+
+    const detailedPrompt = detailedPrompts[userLang] || detailedPrompts.ar;
+
+    await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, detailedPrompt, userLang);
+
+    telegramBot.userStates.delete(ctx.from.id);
+    await ctx.reply('✅ تم التدريب!');
+    await showAISettings(ctx);
+  }
+
+  if (state.step === 'advanced_prompt') {
+    if (!aiSettings) {
+      await ctx.reply('❌ يجب إعداد DeepSeek أولاً.');
+      telegramBot.userStates.delete(ctx.from.id);
+      return;
+    }
+
+    const userPrompt = ctx.message.text;
+    const userLang = aiSettings.language || 'ar';
+
+    const advancedSuffixes = {
+      ar: '. أجب بشكل مفصّل وواضح. اكتب فقرات كاملة. اجعل إجاباتك شاملة ومفيدة.',
+      en: '. Answer in detail and clearly. Write full paragraphs. Make your answers comprehensive and useful.',
+      fr: '. Répondez en détail et clairement. Écrivez des paragraphes entiers. Soyez complet et utile.',
+      de: '. Antworten Sie detailliert und klar. Schreiben Sie vollständige Absätze. Seien Sie umfassend und nützlich.'
+    };
+
+    const advancedPrompt = userPrompt + (advancedSuffixes[userLang] || advancedSuffixes.ar);
+
+    await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, advancedPrompt, userLang);
+
+    telegramBot.userStates.delete(ctx.from.id);
+    await ctx.reply('✅ تم التدريب!');
+    await showAISettings(ctx);
+  }
+
+  if (state.step === 'enhance_prompt') {
+    if (!aiSettings) {
+      await ctx.reply('❌ يجب إعداد الذكاء الاصطناعي أولاً.');
+      telegramBot.userStates.delete(ctx.from.id);
+      return;
+    }
+
+    const userText = ctx.message.text || '';
+    const enhancePrompt = 'حسّن: ' + userText;
+
+    try {
+      const result = await aiService.getAIReply(
+        aiSettings.provider,
+        aiSettings.api_key,
+        aiSettings.model,
+        'أنت مساعد محترف لتحسين النصوص.',
+        [{ role: 'user', content: enhancePrompt }]
+      );
+
+      await ctx.reply('✨ النتيجة:\n\n' + result.reply);
+      await ctx.reply('هل تريد حفظ هذا كتعليمات؟', {
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback('✅ نعم', 'save_enhanced_' + encodeURIComponent(result.reply.substring(0, 60)))],
+            [Markup.button.callback('❌ لا', 'train_ai')]
+          ]
+        }
+      });
+    } catch (error) {
+      console.error('Error enhancing text:', error.message);
+      await ctx.reply('❌ حدث خطأ: ' + error.message);
+    }
+
+    telegramBot.userStates.delete(ctx.from.id);
+  }
+
+  if (state.step === 'test_ai_input') {
+    if (!aiSettings) {
+      await ctx.reply('❌ يجب إعداد الذكاء الاصطناعي أولاً.');
+      telegramBot.userStates.delete(ctx.from.id);
+      return;
+    }
+
+    try {
+      const result = await aiService.getAIReply(
+        aiSettings.provider,
+        aiSettings.api_key,
+        aiSettings.model,
+        aiSettings.system_prompt || 'أنت مساعد ذكي.',
+        [{ role: 'user', content: ctx.message.text }]
+      );
+
+      await ctx.reply('🤖 الرد:\n\n' + result.reply);
+      await ctx.reply('جرب مرة أخرى؟', {
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback('✅ نعم', 'test_ai')],
+            [Markup.button.callback('❌ لا', 'ai_settings')]
+          ]
+        }
+      });
+    } catch (error) {
+      console.error('AI test error:', error.message);
+      await ctx.reply('❌ خطأ في الاختبار: ' + error.message);
+    }
+
+    telegramBot.userStates.delete(ctx.from.id);
+  }
 }
 
 // Broadcast Menu
 async function showBroadcastMenu(ctx) {
   await ctx.reply(
-    '📢 إرسال رسالة جماعية\n\nاختر نوع الرسالة:',
+    '📢 رسالة جماعية\n\nاختر النوع:',
     Markup.inlineKeyboard([
       [Markup.button.callback('📝 نص فقط', 'broadcast_text')],
       [Markup.button.callback('🖼️ صورة + نص', 'broadcast_image')],
@@ -518,7 +471,6 @@ async function handleBroadcastFlow(ctx, state, telegramBot) {
   const user = await db.getUserByTelegramId(ctx.from.id);
 
   if (state.type !== 'text' && state.step === 'media') {
-    // Handle media upload
     let fileId;
     if (ctx.message.photo) {
       fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
@@ -529,210 +481,363 @@ async function handleBroadcastFlow(ctx, state, telegramBot) {
     }
 
     const file = await ctx.telegram.getFile(fileId);
-    state.mediaUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    state.mediaUrl = 'https://api.telegram.org/file/bot' + process.env.TELEGRAM_BOT_TOKEN + '/' + file.file_path;
     state.step = 'message';
     telegramBot.userStates.set(ctx.from.id, state);
-    await ctx.reply('📝 أرسل النص المرفق:');
+    await ctx.reply('📝 أرسل نص الرسالة:');
     return;
   }
 
   if (state.step === 'message') {
-    state.messageText = ctx.message.text;
-    state.step = 'recipients';
+    state.message = ctx.message.text;
+    state.step = 'confirm';
     telegramBot.userStates.set(ctx.from.id, state);
 
-    const totalContacts = await db.getContactsCount(user.id);
+    let preview = state.type === 'text'
+      ? state.message
+      : (state.mediaType === 'image' ? 'صورة' : 'فيديو') + ' + ' + state.message;
 
-    await ctx.reply(
-      `📊 اختر المستلمين:\n\nإجمالي جهات الاتصال: ${totalContacts}`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback(`✅ الكل (${totalContacts})`, 'broadcast_all')],
-        [Markup.button.callback('📅 حسب التاريخ', 'broadcast_date_range')],
-        [Markup.button.callback('❌ إلغاء', 'back_dashboard')]
-      ])
-    );
-  }
-}
-
-// Confirm and send broadcast
-async function confirmBroadcast(ctx, filter, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  const user = await db.getUserByTelegramId(ctx.from.id);
-
-  // Get recipients based on filter
-  let contacts;
-  if (filter === 'all') {
-    contacts = await db.getContacts(user.id);
-  } else if (filter.dateFrom && filter.dateTo) {
-    contacts = await db.getContacts(user.id, filter.dateFrom, filter.dateTo);
-  }
-
-  if (contacts.length === 0) {
-    await ctx.reply('❌ لا توجد جهات اتصال تطابق المعايير المختارة.');
-    return;
-  }
-
-  // Build recipients list message
-  let recipientsList = '📋 <b>قائمة المستلمين</b>\n\n';
-  recipientsList += '━━━━━━━━━━━━━━━━━━━━━\n';
-  
-  // Show first 15 contacts as preview
-  const displayContacts = contacts.slice(0, 15);
-  displayContacts.forEach((contact, index) => {
-    const name = contact.name || contact.phone_number.split('@')[0];
-    const status = contact.first_message_at ? '🟢 نشط' : '⚪ غير نشط';
-    recipientsList += `${index + 1}. ${name}\n`;
-    recipientsList += `   📱 ${contact.phone_number.split('@')[0]}\n`;
-    recipientsList += `   ${status}\n`;
-    recipientsList += '━━━━━━━━━━━━━━━━━━━━━\n';
-  });
-
-  if (contacts.length > 15) {
-    recipientsList += `\n<i>... و ${contacts.length - 15} مستلم آخرين</i>\n`;
-  }
-
-  recipientsList += `\n<b>📊 الإجمالي: ${contacts.length} مستلم</b>`;
-
-  // Preview message
-  let previewMessage = '\n📋 <b>معاينة الرسالة:</b>\n\n';
-  previewMessage += `📝 <b>النص:</b> ${state.messageText}\n`;
-  if (state.mediaUrl) {
-    previewMessage += `📎 <b>الوسائط:</b> ${state.mediaType === 'image' ? 'صورة' : 'فيديو'}\n`;
-  }
-
-  // Send recipients list first
-  await ctx.reply(recipientsList, { parse_mode: 'HTML' });
-  
-  // Then send preview with buttons
-  await ctx.reply(
-    previewMessage,
-    {
-      parse_mode: 'HTML',
+    await ctx.reply('📋 المعاينة:\n\n' + preview);
+    await ctx.reply('هل تريد الإرسال؟', {
       reply_markup: {
         inline_keyboard: [
-          [Markup.button.callback('✅ تأكيد والإرسال', 'broadcast_send_now')],
-          [Markup.button.callback('📋 عرض القائمة', 'broadcast_show_list')],
-          [Markup.button.callback('✏️ تعديل', 'broadcast')],
-          [Markup.button.callback('❌ إلغاء', 'back_dashboard')]
+          [Markup.button.callback('📤 إرسال', 'confirm_broadcast')],
+          [Markup.button.callback('❌ إلغاء', 'broadcast_menu')]
         ]
       }
-    }
-  );
-
-  // Store recipients in state
-  state.recipients = contacts;
-  state.filter = filter;
-  telegramBot.userStates.set(ctx.from.id, state);
-}
-
-// Show full recipients list
-async function showBroadcastList(ctx, telegramBot) {
-  const state = telegramBot.userStates.get(ctx.from.id);
-  
-  if (!state || !state.recipients) {
-    await ctx.reply('❌ لا توجد قائمة مستلمين.');
-    return;
-  }
-
-  const contacts = state.recipients;
-  const totalContacts = contacts.length;
-  
-  // Send in chunks of 20
-  const chunkSize = 20;
-  for (let i = 0; i < contacts.length; i += chunkSize) {
-    const chunk = contacts.slice(i, i + chunkSize);
-    let message = `📋 <b>قائمة المستلمين</b> (${i + 1} - ${Math.min(i + chunkSize, totalContacts)})\n\n`;
-    
-    chunk.forEach((contact, index) => {
-      const name = contact.name || contact.phone_number.split('@')[0];
-      const phone = contact.phone_number.split('@')[0];
-      const lastMsg = contact.last_message_at ? new Date(contact.last_message_at).toLocaleDateString('ar-EG') : 'N/A';
-      message += `${i + index + 1}. ${name}\n`;
-      message += `   📱 ${phone}\n`;
-      message += `   🕐 آخر رسالة: ${lastMsg}\n`;
-      message += '━━━━━━━━━━━━━━━━━━━━━\n';
     });
-
-    await ctx.reply(message, { parse_mode: 'HTML' });
   }
-
-  // Send confirmation buttons
-  let previewMessage = '📋 <b>معاينة الرسالة:</b>\n\n';
-  previewMessage += `📝 <b>النص:</b> ${state.messageText}\n`;
-  if (state.mediaUrl) {
-    previewMessage += `📎 <b>الوسائط:</b> ${state.mediaType === 'image' ? 'صورة' : 'فيديو'}\n`;
-  }
-  previewMessage += `\n<b>📊 الإجمالي: ${totalContacts} مستلم</b>`;
-
-  await ctx.reply(
-    previewMessage,
-    {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          [Markup.button.callback('✅ تأكيد والإرسال', 'broadcast_send_now')],
-          [Markup.button.callback('✏️ تعديل', 'broadcast')],
-          [Markup.button.callback('❌ إلغاء', 'back_dashboard')]
-        ]
-      }
-    }
-  );
 }
 
-// Statistics
-async function showStatistics(ctx) {
+// Confirm broadcast
+async function confirmBroadcast(ctx, state, telegramBot) {
   const user = await db.getUserByTelegramId(ctx.from.id);
-  const stats = await db.getUserStats(user.id);
   const contacts = await db.getContacts(user.id);
 
-  // Calculate additional stats
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayContacts = contacts.filter(c => new Date(c.last_message_at) >= today).length;
+  let sent = 0;
+  let failed = 0;
 
-  const thisWeek = new Date();
-  thisWeek.setDate(thisWeek.getDate() - 7);
-  const weekContacts = contacts.filter(c => new Date(c.last_message_at) >= thisWeek).length;
+  for (const contact of contacts) {
+    try {
+      if (state.type === 'text') {
+        const axios = require('axios');
+        await axios.post(`http://localhost:8080/message/sendText/${user.instance_name}`, {
+          number: contact.phone_number.split('@')[0],
+          text: state.message
+        });
+      } else if (state.mediaType === 'image') {
+        await axios.post(`http://localhost:8080/message/sendImage/${user.instance_name}`, {
+          number: contact.phone_number.split('@')[0],
+          image: state.mediaUrl,
+          caption: state.message
+        });
+      } else if (state.mediaType === 'video') {
+        await axios.post(`http://localhost:8080/message/sendVideo/${user.instance_name}`, {
+          number: contact.phone_number.split('@')[0],
+          video: state.mediaUrl,
+          caption: state.message
+        });
+      }
+      sent++;
+    } catch (e) {
+      failed++;
+    }
+  }
 
-  const message = `
-📊 الإحصائيات التفصيلية
+  await ctx.reply('✅ تم! المرسلة: ' + sent + ' / الفاشلة: ' + failed);
+  telegramBot.userStates.delete(ctx.from.id);
+}
 
-👥 جهات الاتصال:
-   • الإجمالي: ${stats.totalContacts}
-   • اليوم: ${todayContacts}
-   • هذا الأسبوع: ${weekContacts}
+// Show broadcast list
+async function showBroadcastList(ctx) {
+  await ctx.reply('📢 استخدم الأمر /broadcast لإرسال رسائل جماعية.');
+}
 
-🤖 الردود التلقائية: ${stats.activeAutoReplies}
+// Show statistics
+async function showStatistics(ctx) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+  const contacts = await db.getContacts(user.id);
+  const autoReplies = await db.getAutoReplies(user.id);
 
-📢 الرسائل الجماعية:
-   • الإجمالي: ${stats.totalBroadcasts}
+  let message = '📊 الإحصائيات\n\n';
+  message += '👥 جهات الاتصال: ' + contacts.length + '\n';
+  message += '🤖 الردود النشطة: ' + autoReplies.length;
 
-📱 الحساب: ${user.phone_number || 'غير متوفر'}
-✅ الحالة: متصل
-  `;
-
-  await ctx.reply(message, Markup.inlineKeyboard([
-    [Markup.button.callback('🔙 العودة', 'back_dashboard')]
-  ]));
+  await ctx.reply(message);
 }
 
 // Handle disconnect
 async function handleDisconnect(ctx) {
-  await ctx.reply(
-    '⚠️ هل أنت متأكد من قطع الاتصال؟\n\nسيتم حذف جميع البيانات المرتبطة بحسابك.',
-    Markup.inlineKeyboard([
-      [Markup.button.callback('✅ نعم، قطع الاتصال', 'confirm_disconnect')],
-      [Markup.button.callback('❌ إلغاء', 'back_dashboard')]
-    ])
+  const user = await db.getUserByTelegramId(ctx.from.id);
+  await db.updateUserConnection(user.id, null, null);
+  await ctx.reply('✅ تم قطع الواتساب.');
+}
+
+// Add auto reply
+async function handleAddAutoReply(ctx, state, telegramBot) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+
+  if (state.step === 'keyword') {
+    state.keyword = ctx.message.text;
+    state.step = 'reply';
+    telegramBot.userStates.set(ctx.from.id, state);
+    await ctx.reply('📝 أرسل نص الرد:');
+    return;
+  }
+
+  if (state.step === 'reply') {
+    state.reply = ctx.message.text;
+    state.step = 'media_choice';
+    telegramBot.userStates.set(ctx.from.id, state);
+
+    await ctx.reply('🖼️ <b>هل تريد إضافة وسائط (صورة/فيديو) لهذا الرد؟</b>', {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [Markup.button.callback('🖼️ إضافة صورة', 'ar_media_image')],
+          [Markup.button.callback('🎥 إضافة فيديو', 'ar_media_video')],
+          [Markup.button.callback('⏭️ تخطي (نص فقط)', 'ar_media_none')]
+        ]
+      }
+    });
+    return;
+  }
+
+  // Handle actual media upload
+  if (state.step === 'media_upload') {
+    let fileId;
+    if (ctx.message.photo) {
+      fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+      state.mediaType = 'image';
+    } else if (ctx.message.video) {
+      fileId = ctx.message.video.file_id;
+      state.mediaType = 'video';
+    } else if (ctx.message.document) {
+      fileId = ctx.message.document.file_id;
+      state.mediaType = 'document';
+    }
+
+    if (fileId) {
+      const file = await ctx.telegram.getFile(fileId);
+      state.mediaUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+      await ctx.reply('✅ تم استلام الوسائط.');
+      await finishAutoReply(ctx, state, telegramBot);
+    }
+  }
+}
+
+// Finish and Save Auto Reply
+async function finishAutoReply(ctx, state, telegramBot) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+
+  await db.addAutoReply(
+    user.id,
+    state.keyword,
+    state.reply,
+    state.mediaUrl || null,
+    state.mediaType || null,
+    'none' // Reset capture mode to none
   );
+
+  await ctx.reply('✅ <b>تم حفظ الرد التلقائي بنجاح!</b>', { parse_mode: 'HTML' });
+  telegramBot.userStates.delete(ctx.from.id);
+
+  // Return to menu
+  setTimeout(() => {
+    telegramBot.showAutoRepliesMenu(ctx);
+  }, 1000);
+}
+
+// Handle URL type selection
+async function handleURLTypeSelection(ctx, state) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+
+  if (state.step === 'url_keyword') {
+    state.keyword = ctx.message.text;
+    state.step = 'url_media';
+    ctx.session.userState = state;
+
+    await ctx.reply('📤 أرسل الوسائط:', {
+      reply_markup: {
+        inline_keyboard: [
+          [Markup.button.callback('🖼️ صورة', 'url_type_image')],
+          [Markup.button.callback('🎥 فيديو', 'url_type_video')],
+          [Markup.button.callback('📝 نص فقط', 'url_type_none')]
+        ]
+      }
+    });
+  }
+}
+
+// Set language
+async function handleSetLanguage(ctx, lang) {
+  const user = await db.getUserByTelegramId(ctx.from.id);
+  await db.setUserLanguage(user.id, lang);
+  await ctx.reply(t('language_changed', lang));
+}
+
+// Handle Order Status Change
+async function handleOrderStatusChange(ctx, status, phoneNumber, telegramBot) {
+  try {
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const storeName = await db.getUserStoreName(ctx.from.id) || 'المتجر';
+    const googleMapsLink = await db.getUserGoogleMapsLink(ctx.from.id);
+
+    let message = '';
+    let replyText = '';
+
+    if (status === 'cooking') {
+      message = '👨‍🍳 <b>تم تغيير الحالة: جاري التجهيز</b>\nسيعلم العميل أن طلبه قيد التحضير.';
+      replyText = `مرحباً بك في ${storeName} 🌹\n\nبدأنا بتجهيز طلبك الآن 👨‍🍳🔥\nسيصلك إشعار آخر عند خروج الطلب للتوصيل.`;
+    } else if (status === 'delivery') {
+      message = '🛵 <b>تم تغيير الحالة: تم الإرسال</b>\nسيعلم العميل أن الطلب في الطريق.';
+      replyText = `مرحباً 🌹\n\nطلبك الآن في الطريق إليك 🛵💨\nسيصلك عامل التوصيل في أقرب وقت.`;
+    } else if (status === 'completed') {
+      message = '✅ <b>تم تغيير الحالة: تم التسليم</b>\nتم شكر العميل وإرسال رابط التقييم.';
+      replyText = `شكراً لاختيارك ${storeName} ❤️\n\nنتمنى أن يكون الطلب قد نال إعجابك.\n`;
+      if (googleMapsLink) {
+        replyText += `\nيسعدنا تقييمك لنا على خرائط جوجل:\n${googleMapsLink}`;
+      }
+    }
+
+    // Send WhatsApp message via Evolution API
+    try {
+      const chatId = `${phoneNumber.replace('@s.whatsapp.net', '')}@s.whatsapp.net`;
+      await evolutionAPI.sendTextMessage(user.instance_name, chatId, replyText);
+    } catch (waError) {
+      console.error('Error sending WhatsApp status update:', waError.message);
+    }
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+
+    // Remove buttons only if completed to allow further status changes
+    if (status === 'completed') {
+      try {
+        await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+      } catch (editError) {
+        console.warn('Could not remove buttons:', editError.message);
+      }
+    }
+
+  } catch (error) {
+    console.error('Error handling order status:', error);
+    await ctx.reply('❌ حدث خطأ أثناء تحديث حالة الطلب.');
+  }
+}
+
+// Handle Set Google Maps Link
+async function handleSetGoogleMaps(ctx) {
+  await ctx.reply('📍 <b>إعداد رابط خرائط جوجل</b>\n\nأرسل رابط موقع المطعم على خرائط جوجل الآن:\n(مثال: https://maps.app.goo.gl/...)', { parse_mode: 'HTML' });
+}
+
+// Show Order Reports Menu
+async function showOrderReports(ctx) {
+  let message = '📊 <b>تقارير الطلبات</b>\n\n';
+  message += '━━━━━━━━━━━━━━━━━━━━━\n';
+  message += 'اختر نوع التقرير الذي تريد عرضه:';
+
+  await ctx.reply(message, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [Markup.button.callback('🗓️ طلبات آخر 24 ساعة', 'report_24h')],
+        [Markup.button.callback('📅 طلبات الشهر الحالي', 'report_month')],
+        [Markup.button.callback('📥 تصدير إكسل (24 ساعة)', 'export_report_24h')],
+        [Markup.button.callback('📥 تصدير إكسل (الشهري)', 'export_report_month')],
+        [Markup.button.callback('🔙 العودة', 'back_dashboard')]
+      ]
+    }
+  });
+}
+
+// Handle Order Export Reports
+async function handleGetOrderExport(ctx, range) {
+  try {
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const orders = await db.getOrdersByTimeRange(user.id, range);
+
+    if (!orders || orders.length === 0) {
+      await ctx.reply('⚠️ لا توجد طلبات لتصديرها في هذه الفترة.');
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    await ctx.reply('⏳ جاري تجهيز ملف الإكسل...');
+    await ctx.answerCbQuery();
+
+    const title = range === '24h' ? 'orders_24h' : 'orders_month';
+    const filePath = await excelService.generateOrdersExport(orders, `${title}_${user.id}.xlsx`);
+
+    const captionTitle = range === '24h' ? 'آخر 24 ساعة' : 'الشهر الحالي';
+    await ctx.replyWithDocument({ source: filePath, filename: `${captionTitle}.xlsx` }, {
+      caption: `📊 <b>تقرير إكسل: ${captionTitle}</b>\n\nإجمالي الطلبات: ${orders.length}`,
+      parse_mode: 'HTML'
+    });
+
+    // Delete file after sending
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.error('Error exporting order report:', error);
+    await ctx.reply('❌ حدث خطأ أثناء تصدير الملف.');
+  }
+}
+
+// Handle dynamic order reports
+async function handleGetOrderReport(ctx, range) {
+  try {
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const orders = await db.getOrdersByTimeRange(user.id, range);
+
+    const title = range === '24h' ? 'آخر 24 ساعة' : 'الشهر الحالي';
+    let message = `📊 <b>تقرير الطلبات (${title})</b>\n\n`;
+    message += '━━━━━━━━━━━━━━━━━━━━━\n';
+
+    if (orders.length === 0) {
+      message += '❌ لا توجد طلبات في هذه الفترة.';
+    } else {
+      message += `✅ <b>إجمالي الطلبات:</b> ${orders.length}\n\n`;
+
+      // Group by status
+      const stats = orders.reduce((acc, order) => {
+        acc[order.status] = (acc[order.status] || 0) + 1;
+        return acc;
+      }, {});
+
+      message += `👨‍🍳 قيد التجهيز: ${stats['cooking'] || stats['pending'] || 0}\n`;
+      message += `🛵 في الطريق: ${stats['delivery'] || 0}\n`;
+      message += `✅ مكتملة: ${stats['completed'] || 0}\n`;
+      message += '━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+      // List last 5 orders for context
+      message += '<b>آخر 5 طلبات:</b>\n';
+      orders.slice(0, 5).forEach((o, i) => {
+        const date = new Date(o.created_at).toLocaleDateString('ar-EG');
+        message += `${i + 1}. ${o.customer_name} - ${o.product} (${o.status})\n`;
+      });
+    }
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+    await ctx.answerCbQuery();
+  } catch (error) {
+    console.error('Error generating report:', error);
+    await ctx.reply('❌ حدث خطأ أثناء إنشاء التقرير.');
+  }
 }
 
 module.exports = {
   showAISettings,
-  handleSetupAI,
-  handleSetupGemini,
+  handleSetupChatGPT,
   disableAI,
   handleTrainAI,
+  handleSheetsSetup,
+  handleToggleNotifications,
+  handleOrderStatusChange,
+  handleSetGoogleMaps,
+  showOrderReports,
+  handleGetOrderReport,
+  handleGetOrderExport,
   showBroadcastMenu,
   startBroadcastFlow,
   handleBroadcastFlow,
@@ -743,5 +848,6 @@ module.exports = {
   handleAddAutoReply,
   finishAutoReply,
   handleURLTypeSelection,
-  handleSetLanguage
+  handleSetLanguage,
+  finishAutoReply
 };

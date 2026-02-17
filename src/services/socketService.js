@@ -90,7 +90,7 @@ class SocketService {
                     console.error(`❌ Polling error for ${instanceName}:`, error.message);
                 }
             }
-        }, 5000); // Check every 5 seconds
+        }, 1000); // Check every 1 second for instant response
 
         this.pollingIntervals.set(instanceName, interval);
     }

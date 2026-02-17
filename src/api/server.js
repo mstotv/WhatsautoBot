@@ -2,10 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const db = require('../services/database');
 const evolutionAPI = require('../services/evolutionAPI');
+const aiService = require('../services/aiService');
+const sheetsService = require('../services/sheetsService');
+const notificationService = require('../services/notificationService');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
 
 class APIServer {
   constructor(telegramBot) {
@@ -25,26 +29,127 @@ class APIServer {
   }
 
   setupRoutes() {
-    // Health check
-    this.app.get('/health', (req, res) => {
-      res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    // Landing Page (Home)
+    this.app.get('/', (req, res) => {
+      const templates = require('./templates');
+      const lang = req.query.lang || req.acceptsLanguages(['ar', 'en', 'de', 'fr']) || 'ar';
+      res.send(templates.renderHome(lang));
     });
 
-    // Evolution API Webhook Handler
-    this.app.post('/webhook/evolution/:instanceName', async (req, res) => {
+    // Google OAuth Callback
+    this.app.get('/auth/google/callback', async (req, res) => {
+      const { code, state } = req.query; // state is the telegramId
+      if (!code || !state) {
+        return res.status(400).send('Missing code or state');
+      }
+
       try {
-        await this.handleEvolutionWebhook(req.params.instanceName, req.body);
-        res.sendStatus(200);
+        const googleAuthService = require('../services/googleAuthService');
+        const telegramId = state;
+        const user = await db.getUserByTelegramId(telegramId);
+
+        if (!user) {
+          return res.status(404).send('User not found');
+        }
+
+        console.log(`🔑 Received Google Auth code for user ${telegramId}`);
+        const tokens = await googleAuthService.getTokensFromCode(code);
+
+        await db.saveGoogleTokens(user.id, {
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token,
+          expiry_date: tokens.expiry_date
+        });
+
+        console.log(`✅ Google OAuth tokens saved for user ${telegramId}`);
+
+        // Set bot state so the user can immediately send the URL
+        if (this.telegramBot) {
+          this.telegramBot.userStates.set(Number(telegramId), {
+            action: 'setup_sheets',
+            step: 'spreadsheet_url'
+          });
+        }
+
+        if (this.telegramBot) {
+          await this.telegramBot.bot.telegram.sendMessage(
+            telegramId,
+            '✅ <b>تم ربط حساب Google بنجاح!</b>\n\nبقي خطوة واحدة أخيرة:\nأرسل الآن <b>رابط ملف الإكسل (URL)</b> الذي تريد استخدامه للطلبات لكي يتم تفعيله رسمياً.',
+            { parse_mode: 'HTML' }
+          );
+        }
+
+        res.send(`
+          <html>
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5; margin: 0; }
+                .card { background: white; padding: 2.5rem; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); text-align: center; max-width: 400px; width: 90%; }
+                .icon { font-size: 4rem; color: #4caf50; margin-bottom: 1rem; }
+                h1 { color: #1c1e21; margin-bottom: 0.5rem; font-size: 1.5rem; }
+                p { color: #606770; line-height: 1.5; margin-bottom: 2rem; }
+                .btn { 
+                  display: inline-block; 
+                  background: #0088cc; 
+                  color: white; 
+                  padding: 12px 24px; 
+                  border-radius: 8px; 
+                  text-decoration: none; 
+                  font-weight: bold;
+                  transition: background 0.2s;
+                }
+                .btn:hover { background: #0077b3; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                <div class="icon">✅</div>
+                <h1>تم الربط بنجاح!</h1>
+                <p>تم ربط حساب جوجل للطلبات بنجاح. يمكنك الآن العودة إلى البوت لإكمال الإعداد.</p>
+                <a href="https://t.me/Whatsautoappbot" class="btn">العودة إلى تيليجرام</a>
+                <script>
+                  // Try to close the window after 10 seconds if they haven't clicked
+                  setTimeout(() => {
+                    // window.close() usually only works on windows opened by script, 
+                    // but it's a nice-to-have.
+                  }, 10000);
+                </script>
+              </div>
+            </body>
+          </html>
+        `);
       } catch (error) {
-        console.error('Webhook error:', error);
-        res.sendStatus(500);
+        console.error('❌ OAuth Error:', error);
+        res.status(500).send('حدث خطأ أثناء الربط: ' + error.message);
       }
     });
 
-    // Telegram Webhook (optional - if using webhooks instead of polling)
-    this.app.post('/webhook/telegram', (req, res) => {
-      this.telegramBot.getBot().handleUpdate(req.body);
-      res.sendStatus(200);
+    // Privacy Policy Route
+    this.app.get('/privacy', (req, res) => {
+      const templates = require('./templates');
+      const lang = req.query.lang || req.acceptsLanguages(['ar', 'en', 'de', 'fr']) || 'ar';
+      res.send(templates.renderPrivacy(lang));
+    });
+
+    // Terms of Service Route
+    this.app.get('/terms', (req, res) => {
+      const templates = require('./templates');
+      const lang = req.query.lang || req.acceptsLanguages(['ar', 'en', 'de', 'fr']) || 'ar';
+      res.send(templates.renderTerms(lang));
+    });
+
+    // Plisio Payment Webhook
+    this.app.post('/api/payment/plisio-webhook', async (req, res) => {
+      try {
+        console.log('💎 Plisio Webhook Received:', req.body);
+        await this.handlePlisioWebhook(req.body);
+        res.status(200).send('OK');
+      } catch (error) {
+        console.error('❌ Plisio Webhook Error:', error.message);
+        res.status(500).send('Error');
+      }
     });
 
     // 404 handler
@@ -165,13 +270,13 @@ class APIServer {
           continue;
         }
 
-        // Skip messages sent very recently (within last 5 seconds) - prevents broadcast loops
+        // Skip messages sent very recently (within last 1 second) - prevents broadcast loops
         const messageTimestamp = message.messageTimestamp;
         if (messageTimestamp) {
           const now = Math.floor(Date.now() / 1000);
           const messageTime = typeof messageTimestamp === 'number' ? messageTimestamp : parseInt(messageTimestamp);
-          if (now - messageTime < 5) {
-            console.log(`⏭️ [handleIncomingMessage] Skipping message sent within last 5 seconds (possible broadcast echo): ${messageId}`);
+          if (now - messageTime < 1) {
+            console.log(`⏭️ [handleIncomingMessage] Skipping message sent within last 1 second: ${messageId}`);
             continue;
           }
         }
@@ -196,13 +301,40 @@ class APIServer {
           remoteId = message.key.remoteJidAlt;
         }
 
-        const messageText = message.message?.conversation ||
+        let messageText = message.message?.conversation ||
           message.message?.extendedTextMessage?.text || '';
+
+        // Handle Audio / Voice Message
+        const audioMsg = message.message?.audioMessage;
+        if (audioMsg && !messageText) {
+          console.log(`🎤 Audio message detected from ${remoteId}. Transcribing...`);
+          try {
+            const aiSettings = await db.getAISettings(user.id);
+            if (aiSettings && aiSettings.api_key) {
+              // Download audio using Evolution API helper
+              const audioBuffer = await evolutionAPI.downloadMedia(user.instance_name, message);
+
+              if (audioBuffer) {
+                // Transcribe
+                const transcription = await aiService.transcribeAudio(
+                  aiSettings.api_key,
+                  audioBuffer,
+                  'speech.ogg'
+                );
+
+                console.log(`📝 Transcribed text: "${transcription}"`);
+                messageText = transcription;
+              }
+            }
+          } catch (transError) {
+            console.error('⚠️ Error transcribing audio:', transError.message);
+          }
+        }
 
         console.log(`📩 Message content: "${messageText}" from ${remoteId}`);
 
-        if (!remoteId || !messageText) {
-          console.log('⚠️ Skipping: Missing remoteId or messageText', { remoteId, hasText: !!messageText });
+        if (!remoteId || (!messageText && !audioMsg)) {
+          console.log('⚠️ Skipping: Missing remoteId or message content', { remoteId, hasText: !!messageText });
           continue;
         }
 
@@ -222,7 +354,18 @@ class APIServer {
 
       console.log(`📨 Processing message from ${remoteId} for user ${user.telegram_id}: "${messageText}"`);
 
-      // Check working hours
+      // === STEP 1: Send notification to the user on Telegram ===
+      if (user.notifications_enabled !== false && this.telegramBot) {
+        await notificationService.notifyNewMessage(
+          this.telegramBot.bot,
+          user.telegram_id,
+          pushName,
+          remoteId,
+          messageText
+        );
+      }
+
+      // === STEP 2: Check working hours ===
       const shouldAutoReply = await this.checkWorkingHours(user);
       if (!shouldAutoReply) {
         console.log(`🕒 Outside working hours for user ${user.telegram_id}. Sending auto-response...`);
@@ -232,13 +375,13 @@ class APIServer {
 
       console.log(`✅ Within working hours. Checking for auto-replies...`);
 
-      // Check for auto-replies
+      // === STEP 4: Check for keyword auto-replies ===
       const autoReply = await this.findAutoReply(user, messageText);
       if (autoReply) {
-        console.log(`🤖 Found keyword match: "${autoReply.keyword}". Sending reply to ${remoteId}...`);
+        console.log(`🤖 Found keyword match: "${autoReply.keyword}".`);
 
+        // Send the actual reply
         if (autoReply.media_url) {
-          console.log(`🖼️ Sending media reply (${autoReply.media_type}) to ${remoteId}...`);
           await evolutionAPI.sendMediaMessage(
             user.instance_name,
             remoteId,
@@ -250,26 +393,123 @@ class APIServer {
           await evolutionAPI.sendTextMessage(user.instance_name, remoteId, autoReply.reply_text);
         }
 
-        console.log(`✅ Auto-reply sent to ${remoteId}`);
         return;
       }
 
-
       console.log(`ℹ️ No auto-reply keyword found. Checking AI settings...`);
 
-      // Check AI settings
+      // Check if AI is paused for this contact
+      const isPaused = await db.getAIPauseState(user.id, remoteId);
+      if (isPaused) {
+        console.log(`⏸️ AI is paused for contact ${remoteId}. Skipping AI response.`);
+        return;
+      }
+
+      // === STEP 5: Global AI Agent Processing ===
       const aiSettings = await db.getAISettings(user.id);
-      if (aiSettings && aiSettings.is_active) {
-        console.log(`🤖 AI is active (${aiSettings.provider}). Generating reply for ${remoteId}...`);
-        const aiReply = await this.getAIReply(aiSettings, messageText);
-        if (aiReply) {
-          await evolutionAPI.sendTextMessage(user.instance_name, remoteId, aiReply);
-          console.log(`✅ AI reply sent to ${remoteId}`);
-        } else {
-          console.log(`⚠️ AI reply was empty or failed.`);
+      if (!aiSettings || !aiSettings.is_active || !aiSettings.api_key) {
+        console.log(`ℹ️ AI is not configured/active for user ${user.telegram_id}`);
+        return;
+      }
+
+      console.log(`🧠 AI Agent active (${aiSettings.provider}). Processing with conversation memory...`);
+
+      // Load conversation history
+      const history = await db.getConversationHistory(user.id, remoteId, aiSettings.max_context_messages || 10);
+      history.push({ role: 'user', content: messageText });
+
+      // Save user message to history
+      await db.saveMessage(user.id, remoteId, 'user', messageText);
+
+      // Load Google Sheets data if configured
+      let sheetsContext = null;
+      try {
+        const sheetsSettings = await db.getSheetsSettings(user.id);
+        if (sheetsSettings && sheetsSettings.is_active && sheetsSettings.credentials_json) {
+          sheetsContext = await sheetsService.readSheetData(
+            sheetsSettings.credentials_json,
+            sheetsSettings.spreadsheet_id,
+            sheetsSettings.read_range
+          );
+        }
+      } catch (sheetsError) {
+        console.error('⚠️ Error loading sheets data:', sheetsError.message);
+      }
+
+      // Call AI Agent
+      const aiResult = await aiService.getAIReply(
+        aiSettings.provider,
+        aiSettings.api_key,
+        aiSettings.model,
+        aiSettings.system_prompt,
+        history,
+        sheetsContext,
+        aiSettings.language || user.language || 'ar'
+      );
+
+      if (aiResult && aiResult.reply) {
+        // Send AI reply to WhatsApp
+        await evolutionAPI.sendTextMessage(user.instance_name, remoteId, aiResult.reply);
+        console.log(`✅ AI reply sent to ${remoteId}`);
+
+        // Save AI reply to conversation history
+        await db.saveMessage(user.id, remoteId, 'assistant', aiResult.reply);
+
+        // Check for order detection
+        if (aiResult.orderDetected && aiResult.orderData) {
+          console.log(`🛒 Order detected from ${remoteId}!`, aiResult.orderData);
+
+          // Save order locally
+          try {
+            await db.saveOrder(user.id, aiResult.orderData);
+            console.log(`💾 Order saved locally for user ${user.id}`);
+          } catch (localSaveError) {
+            console.error('⚠️ Error saving order locally:', localSaveError.message);
+          }
+
+          // Notify user about the new order
+          if (this.telegramBot) {
+            await notificationService.notifyNewOrder(
+              this.telegramBot.bot,
+              user.telegram_id,
+              aiResult.orderData,
+              remoteId,
+              pushName // Pass pushName as contactName
+            );
+          }
+
+          // Generate and send PDF Invoice
+          try {
+            const storeName = await db.getUserStoreName(user.telegram_id);
+            const fileName = `invoice_${Date.now()}.pdf`;
+            const filePath = path.join(__dirname, '../../temp', fileName);
+
+            const invoiceService = require('../services/invoiceService');
+            await invoiceService.generateInvoice(
+              aiResult.orderData,
+              storeName || 'My Store',
+              filePath,
+              user.language || 'ar'
+            );
+
+            console.log(`📄 PDF Invoice generated: ${filePath}. Sending to WhatsApp...`);
+            await evolutionAPI.sendMediaMessage(
+              user.instance_name,
+              remoteId,
+              filePath,
+              'تفضل، فاتورة طلبك مرفقة هنا.',
+              'document',
+              fileName
+            );
+
+            // Cleanup
+            fs.unlinkSync(filePath);
+          } catch (pdfError) {
+            console.error('⚠️ Error generating/sending PDF:', pdfError.message);
+          }
         }
       } else {
-        console.log(`ℹ️ AI is disabled or not configured for user ${user.telegram_id}`);
+        console.log(`⚠️ AI returned empty reply for ${remoteId}`);
       }
     } catch (error) {
       console.error('Error in processMessage:', error);
@@ -332,56 +572,7 @@ class APIServer {
     );
   }
 
-  async getAIReply(aiSettings, messageText) {
-    try {
-      if (aiSettings.provider === 'deepseek') {
-        console.log(`🤖 Requesting DeepSeek reply for: "${messageText.substring(0, 50)}..."`);
-        const response = await axios.post(
-          'https://api.deepseek.com/v1/chat/completions',
-          {
-            model: aiSettings.model || 'deepseek-chat',
-            messages: [
-              { role: 'system', content: aiSettings.system_prompt || 'أنت مساعد عربي مفيد. ابرد بإجابات قصيرة ومختصرة. لا تكتب كلام كثير.' },
-              { role: 'user', content: messageText }
-            ],
-            temperature: 0.5,
-            max_tokens: 200
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${aiSettings.api_key}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-
-        return response.data.choices[0].message.content;
-      } else if (aiSettings.provider === 'gemini') {
-        console.log(`🤖 Requesting Gemini reply for: "${messageText.substring(0, 50)}..."`);
-        const genAI = new GoogleGenerativeAI(aiSettings.api_key);
-        const model = genAI.getGenerativeModel({
-          model: aiSettings.model || 'gemini-flash-latest',
-          systemInstruction: aiSettings.system_prompt || 'أنت مساعد عربي مفيد. ابرد بإجابات قصيرة ومختصرة. لا تكتب كلام كثير.'
-        });
-
-        const result = await model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: messageText }] }],
-          generationConfig: {
-            temperature: 0.5,
-            maxOutputTokens: 200
-          }
-        });
-        const geminiResponse = await result.response;
-        const text = geminiResponse.text();
-        console.log(`✅ Gemini generated reply: "${text.substring(0, 50)}..."`);
-        return text;
-      }
-    } catch (error) {
-      console.error('❌ Error getting AI reply:', error.message);
-      if (error.response) console.error('API Response Error:', JSON.stringify(error.response.data));
-      return null;
-    }
-  }
+  // Old getAIReply removed - now using aiService.js
 
   async getUserByInstance(instanceName) {
     try {
@@ -393,6 +584,48 @@ class APIServer {
     } catch (error) {
       console.error('Error getting user by instance:', error);
       return null;
+    }
+  }
+
+  async handlePlisioWebhook(data) {
+    // Plisio sends status in 'status' field. We care about 'completed' or 'finished' or 'mismatch'
+    const status = data.status;
+    const orderNumber = data.order_number; // Format: "telegramId:planId"
+
+    if (status === 'completed' || status === 'finished') {
+      console.log(`✅ Payment confirmed for order: ${orderNumber}`);
+
+      const [telegramId, planId] = orderNumber.split(':');
+      if (!telegramId || !planId) {
+        console.error('❌ Invalid order number format in Plisio webhook');
+        return;
+      }
+
+      // Activate subscription in database
+      const user = await db.activateSubscription(telegramId, planId);
+      if (user) {
+        console.log(`🚀 Subscription activated for user ${telegramId} (Plan: ${planId})`);
+
+        // Mark invoice as completed
+        if (data.txn_id) {
+          await db.markInvoiceCompleted(data.txn_id);
+        }
+
+        // Notify user via Telegram
+        try {
+          const plan = await db.getSubscriptionPlan(planId);
+          const lang = user.language || 'ar';
+          const message = lang === 'ar'
+            ? `💎 <b>تم تفعيل اشتراكك بنجاح!</b>\n\nشكراً لك! حسابك الآن نشط في خطة: <b>${plan.name}</b>\nيمكنك الآن البدء باستخدام كافة المميزات.`
+            : `💎 <b>Subscription Activated!</b>\n\nThank you! Your account is now active on plan: <b>${plan.name}</b>\nYou can now start using all features.`;
+
+          await this.telegramBot.getBot().telegram.sendMessage(telegramId, message, { parse_mode: 'HTML' });
+        } catch (tgError) {
+          console.error('❌ Error sending payment confirmation to Telegram:', tgError.message);
+        }
+      }
+    } else {
+      console.log(`ℹ️ Plisio payment status update: ${status} for ${orderNumber}`);
     }
   }
 

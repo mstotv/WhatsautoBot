@@ -5,6 +5,9 @@ const db = require('../services/database');
 const { pool } = require('../database/migrate');
 const { v4: uuidv4 } = require('uuid');
 const { t } = require('./i18n');
+const excelService = require('../services/excelService');
+const fs = require('fs');
+const plisioService = require('../services/plisioService');
 
 class TelegramBot {
   constructor() {
@@ -65,16 +68,31 @@ class TelegramBot {
 
       // Check subscription status
       const subscription = await db.checkSubscriptionStatus(telegramId);
-      
+
       // If no subscription or expired, try to auto-activate trial
       if (!subscription.active) {
-        // Activate trial for new users
-        await db.activateTrial(telegramId);
-        
-        // Notify admin about new user
-        await this.notifyAdminNewUser(ctx);
-        
-        // Check channel subscription
+        const user = await db.getUserByTelegramId(telegramId);
+
+        // Only activate trial if never used before
+        if (user && !user.trial_used) {
+          await db.activateTrial(telegramId);
+          await this.notifyAdminNewUser(ctx);
+        } else {
+          // If trial already used, just show main menu or subscription required menu
+          // depending on whether they need to subscribe to channel
+          const channelSettings = await db.getChannelSettings();
+          if (channelSettings && channelSettings.is_enabled) {
+            const isSubscribed = await this.checkSubscription(ctx);
+            if (!isSubscribed) {
+              await this.showSubscriptionRequired(ctx);
+              return;
+            }
+          }
+          await this.showMainMenu(ctx);
+          return;
+        }
+
+        // Check channel subscription for the newly activated trial user
         const channelSettings = await db.getChannelSettings();
         if (channelSettings && channelSettings.is_enabled) {
           const isSubscribed = await this.checkSubscription(ctx);
@@ -83,14 +101,14 @@ class TelegramBot {
             return;
           }
         }
-        
+
         await this.showMainMenu(ctx);
         return;
       }
 
       // Check if channel subscription is required
       const channelSettings = await db.getChannelSettings();
-      
+
       if (channelSettings && channelSettings.is_enabled) {
         // Check subscription
         const isSubscribed = await this.checkSubscription(ctx);
@@ -110,7 +128,7 @@ class TelegramBot {
     this.bot.command('admin', async (ctx) => {
       const telegramId = ctx.from.id;
       const adminId = process.env.ADMIN_TELEGRAM_ID || '2009213836';
-      
+
       if (String(telegramId) !== String(adminId)) {
         await ctx.reply('⛔ <b>عذراً، هذه الخاصية للأدمن فقط!</b>\n\nللمساعدة تواصل مع المالك:', {
           parse_mode: 'HTML',
@@ -122,7 +140,7 @@ class TelegramBot {
         });
         return;
       }
-      
+
       await this.showAdminPanel(ctx);
     });
 
@@ -138,20 +156,22 @@ class TelegramBot {
       }
     });
 
-    // Check subscription button
-    this.bot.action('check_subscription', async (ctx) => {
+    // Unified Subscription Verification
+    this.bot.action(['verify_subscription', 'check_subscription'], async (ctx) => {
       try {
-        await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
+        await ctx.answerCbQuery().catch(() => { });
+      } catch (e) { }
+
       const isSubscribed = await this.checkSubscription(ctx);
 
       if (!isSubscribed) {
-        await ctx.reply('❌ لم تقم بالاشتراك في القناة بعد!\nالرجاء الاشتراك أولاً ثم الضغط على زر التحقق.');
+        // Fetch settings again to show the correct link in the error if needed
+        const settings = await db.getChannelSettings();
+        const channelName = settings?.channel_name || 'القناة';
+        await ctx.reply(`❌ <b>لم يتم التحقق</b>\n\nيجب أن تكون مشتركاً في ${channelName} أولاً ثم الضغط على زر التحقق.`, { parse_mode: 'HTML' });
       } else {
-        await db.updateUserSubscription(ctx.from.id, true);
-        await ctx.reply('✅ تم التحقق من الاشتراك بنجاح!');
+        await db.updateUserVerification(ctx.from.id, true);
+        await ctx.reply('✅ <b>تم التحقق بنجاح!</b>\n\nشكراً لاشتراكك، يمكنك الآن استخدام كافة مميزات البوت. 🎉', { parse_mode: 'HTML' });
         await this.showMainMenu(ctx);
       }
     });
@@ -179,7 +199,7 @@ class TelegramBot {
         '📢 <b>Channel</b>: القناة (5 أحرف أو أكثر)\n' +
         '🔑 <b>Token</b>: التوكن (10 أحرف وأرقام)\n' +
         '📱 <b>Number</b>: رقم الهاتف مع مفتاح الدولة\n\n' +
-        '<b>مثال:</b>\nMySession*MyChannel*Tok123en456*+967771234567', 
+        '<b>مثال:</b>\nMySession*MyChannel*Tok123en456*+967771234567',
         { parse_mode: 'HTML' });
     });
 
@@ -190,6 +210,43 @@ class TelegramBot {
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
+      await this.showDashboard(ctx);
+    });
+
+    // Change Language Menu
+    this.bot.action('change_language', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      const lang = user.language || 'ar';
+
+      await ctx.reply(
+        t('select_language', lang),
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🇸🇦 العربية', 'set_lang_ar')],
+          [Markup.button.callback('🇺🇸 English', 'set_lang_en')],
+          [Markup.button.callback('🇫🇷 Français', 'set_lang_fr')],
+          [Markup.button.callback('🇩🇪 Deutsch', 'set_lang_de')],
+          [Markup.button.callback(t('back', lang), 'back_dashboard')]
+        ])
+      );
+    });
+
+    // Set Language Action
+    this.bot.action(/^set_lang_(.+)$/, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+
+      const lang = ctx.match[1];
+      const handlers = require('./handlers');
+      await handlers.handleSetLanguage(ctx, lang);
       await this.showDashboard(ctx);
     });
 
@@ -287,40 +344,28 @@ class TelegramBot {
       await handlers.handleURLTypeSelection(ctx, type, this);
     });
 
-    // Change Language Menu
-    this.bot.action('change_language', async (ctx) => {
+
+
+    // Auto Reply Media Choice
+    this.bot.action(/^ar_media_(.+)$/, async (ctx) => {
       try {
         await ctx.answerCbQuery();
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
+      const type = ctx.match[1];
+      const state = this.userStates.get(ctx.from.id);
+      if (!state) return;
 
-      const user = await db.getUserByTelegramId(ctx.from.id);
-      const lang = user.language || 'ar';
-
-      await ctx.reply(
-        t('select_language', lang),
-        Markup.inlineKeyboard([
-          [Markup.button.callback('🇸🇦 العربية', 'set_lang_ar')],
-          [Markup.button.callback('🇺🇸 English', 'set_lang_en')],
-          [Markup.button.callback('🇩🇪 Deutsch', 'set_lang_de')],
-          [Markup.button.callback('🇫🇷 Français', 'set_lang_fr')],
-          [Markup.button.callback(t('back', lang), 'back_dashboard')]
-        ])
-      );
-    });
-
-    // Set Language Action
-    this.bot.action(/^set_lang_(.+)$/, async (ctx) => {
-      try {
-        await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-
-      const lang = ctx.match[1];
       const handlers = require('./handlers');
-      await handlers.handleSetLanguage(ctx, lang, this);
+      if (type === 'none') {
+        await handlers.finishAutoReply(ctx, state, this);
+      } else {
+        state.step = 'media_upload';
+        state.pendingMediaType = type;
+        this.userStates.set(ctx.from.id, state);
+        await ctx.reply(`📤 من فضلك أرسل الـ ${type === 'image' ? 'صورة' : 'فيديو'} الآن:`);
+      }
     });
 
     // Delete Auto Reply List
@@ -346,6 +391,19 @@ class TelegramBot {
       await db.deleteAutoReply(user.id, keyword);
       await ctx.reply(`✅ تم حذف الرد التلقائي للكلمة: "${keyword}"`);
       await this.showAutoReplyDeletionList(ctx);
+    });
+
+    // Pause AI Action
+    this.bot.action(/^pause_ai:(.+)$/, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const phoneNumber = ctx.match[1];
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      await db.setAIPauseState(user.id, phoneNumber, true);
+      await ctx.reply(`⏸️ تم إيقاف الذكاء الاصطناعي للرقم: ${phoneNumber}. يمكنك الآن الرد يدوياً.`);
     });
 
     // Broadcast Menu
@@ -391,6 +449,83 @@ class TelegramBot {
       await this.showDashboard(ctx);
     });
 
+    // Order Reports Menu
+    this.bot.action('order_reports', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const handlers = require('./handlers');
+      await handlers.showOrderReports(ctx);
+    });
+
+    // Order Reports Actions
+    this.bot.action('report_24h', async (ctx) => {
+      const handlers = require('./handlers');
+      await handlers.handleGetOrderReport(ctx, '24h');
+    });
+
+    this.bot.action('report_month', async (ctx) => {
+      const handlers = require('./handlers');
+      await handlers.handleGetOrderReport(ctx, 'month');
+    });
+
+    this.bot.action('export_report_24h', async (ctx) => {
+      const handlers = require('./handlers');
+      await handlers.handleGetOrderExport(ctx, '24h');
+    });
+
+    this.bot.action('export_report_month', async (ctx) => {
+      const handlers = require('./handlers');
+      await handlers.handleGetOrderExport(ctx, 'month');
+    });
+
+    // Store Settings
+    this.bot.action('store_settings', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      await this.showStoreSettings(ctx);
+    });
+
+    // Set Store Name
+    this.bot.action('set_store_name', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      this.userStates.set(ctx.from.id, { action: 'set_store_name', step: 'input' });
+      await ctx.reply('🏪 <b>إعداد اسم المتجر</b>\n\nيرجى إرسال اسم المتجر أو المطعم الذي سيظهر في الفواتير:', { parse_mode: 'HTML' });
+    });
+
+    // Set Google Maps Link
+    this.bot.action('set_google_maps', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      this.userStates.set(ctx.from.id, { action: 'set_google_maps', step: 'input' });
+      await ctx.reply('📍 <b>إعداد جوجل ماب</b>\n\nيرجى إرسال رابط موقعك على خرائط جوجل:', { parse_mode: 'HTML' });
+    });
+
+    // Handle Order Status Change
+    this.bot.action(/^ord_st:(.+):(.+)$/, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const status = ctx.match[1];
+      const phoneNumber = ctx.match[2];
+      const handlers = require('./handlers');
+      await handlers.handleOrderStatusChange(ctx, status, phoneNumber, this);
+    });
+
     // Handle text messages (for conversations)
     this.bot.on('text', async (ctx) => {
       await this.handleTextMessage(ctx);
@@ -406,6 +541,24 @@ class TelegramBot {
       await this.handleVideoMessage(ctx);
     });
 
+    // Handle document messages
+    this.bot.on('document', async (ctx) => {
+      await this.handleDocumentMessage(ctx);
+    });
+
+    // AI Settings menu
+    this.bot.action('ai_settings', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const handlers = require('./handlers');
+      await handlers.showAISettings(ctx);
+    });
+
+
+
     // Additional action handlers
     this.bot.action('setup_ai', async (ctx) => {
       try {
@@ -415,6 +568,28 @@ class TelegramBot {
       }
       const handlers = require('./handlers');
       await handlers.handleSetupAI(ctx, this);
+    });
+
+    // AI Language Selection
+    this.bot.action(/^ai_lang_(.+)$/, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+
+      const lang = ctx.match[1];
+      const state = this.userStates.get(ctx.from.id);
+      if (state) {
+        state.language = lang;
+        state.step = 'system_prompt';
+        this.userStates.set(ctx.from.id, state);
+
+        await ctx.reply('📝 <b>أرسل التعليمات (System Prompt)</b>\n\n' +
+          'صف كيف تريد أن يرد الذكاء الاصطناعي. مثال:\n' +
+          '"أنت مساعد حجز فنادق. أجب على استفسارات العملاء حول الغرف والأسعار والحجز."',
+          { parse_mode: 'HTML' });
+      }
     });
 
     this.bot.action('disable_ai', async (ctx) => {
@@ -497,30 +672,65 @@ class TelegramBot {
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
-      
+
       const enhancedText = ctx.match[1];
       const user = await db.getUserByTelegramId(ctx.from.id);
       const aiSettings = await db.getAISettings(user.id);
-      
+
       if (!aiSettings) {
         await ctx.reply('❌ يجب إعداد DeepSeek API أولاً.');
         return;
       }
-      
+
       await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, enhancedText);
-      
+
       await ctx.reply('✅ <b>تم حفظ النص المحسّن بنجاح!</b>', { parse_mode: 'HTML' });
+      const handlers = require('./handlers');
       await handlers.showAISettings(ctx);
     });
 
-    this.bot.action('setup_gemini', async (ctx) => {
+    // Export Orders
+    this.bot.action('export_orders', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      await this.handleExportOrders(ctx);
+    });
+
+
+    // ChatGPT (OpenAI) setup
+    this.bot.action('setup_chatgpt', async (ctx) => {
       try {
         await ctx.answerCbQuery();
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
       const handlers = require('./handlers');
-      await handlers.handleSetupGemini(ctx, this);
+      await handlers.handleSetupChatGPT(ctx, this);
+    });
+
+    // Google Sheets setup
+    this.bot.action('setup_sheets', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const handlers = require('./handlers');
+      await handlers.handleSheetsSetup(ctx, this);
+    });
+
+    // Toggle notifications
+    this.bot.action('toggle_notifications', async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const handlers = require('./handlers');
+      await handlers.handleToggleNotifications(ctx);
     });
 
 
@@ -571,7 +781,7 @@ class TelegramBot {
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
-      
+
       // Set state to wait for date input
       const state = this.userStates.get(ctx.from.id);
       if (state) {
@@ -579,7 +789,7 @@ class TelegramBot {
         state.dateStep = 'from';
         this.userStates.set(ctx.from.id, state);
       }
-      
+
       await ctx.reply(
         '📅 إرسال حسب التاريخ\n\n' +
         'أرسل تاريخ البداية بالتنسيق التالي:\n' +
@@ -596,15 +806,15 @@ class TelegramBot {
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
-      
+
       const state = this.userStates.get(ctx.from.id);
       console.log('📤 Broadcast send - State:', JSON.stringify(state));
-      
+
       if (!state || !state.recipients || state.recipients.length === 0) {
         await ctx.reply('❌ لا توجد جهات اتصال. يرجى إنشاء قائمة المستلمين أولاً.');
         return;
       }
-      
+
       await this.executeBroadcast(ctx);
     });
 
@@ -615,7 +825,7 @@ class TelegramBot {
       } catch (e) {
         console.error('Error answering callback query:', e.message);
       }
-      
+
       const handlers = require('./handlers');
       await handlers.showBroadcastList(ctx, this);
     });
@@ -780,15 +990,15 @@ class TelegramBot {
         return;
       }
       const planId = parseInt(ctx.match[1]);
-      
+
       const deleted = await db.deleteSubscriptionPlan(planId);
-      
+
       if (deleted) {
         await ctx.reply('✅ <b>تم حذف الخطة بنجاح!</b>', { parse_mode: 'HTML' });
       } else {
         await ctx.reply('❌ <b>لم يتم العثور على الخطة!</b>', { parse_mode: 'HTML' });
       }
-      
+
       await this.showSubscriptionPlansManagement(ctx);
     });
 
@@ -839,39 +1049,6 @@ class TelegramBot {
       await this.showChannelSettings(ctx);
     });
 
-    this.bot.action('verify_subscription', async (ctx) => {
-      try {
-        await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      
-      // Check channel settings
-      const channelSettings = await db.getChannelSettings();
-      if (!channelSettings || !channelSettings.is_enabled) {
-        // Channel subscription not required
-        await db.updateUserVerification(ctx.from.id, true);
-        await ctx.reply('✅ تم التحقق من حسابك بنجاح!\n\nمرحباً بك في البوت.');
-        await this.showMainMenu(ctx);
-        return;
-      }
-      
-      // Check if user is member of the channel
-      try {
-        const chatMember = await ctx.telegram.getChatMember(channelSettings.channel_link.replace('https://t.me/', '@'), ctx.from.id);
-        
-        if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
-          await db.updateUserVerification(ctx.from.id, true, channelSettings.channel_link);
-          await ctx.reply('✅ <b>تم التحقق بنجاح!</b>\n\nشكراً لاشتراكك في القناة.\n\nمرحباً بك في البوت! 🎉', { parse_mode: 'HTML' });
-          await this.showMainMenu(ctx);
-        } else {
-          await ctx.reply('❌ <b>لم يتم التحقق</b>\n\nيجب أن تكون مشتركاً في القناة أولاً.', { parse_mode: 'HTML' });
-        }
-      } catch (error) {
-        console.error('Error checking membership:', error.message);
-        await ctx.reply('❌ حدث خطأ أثناء التحقق.\n\nيرجى المحاولة مرة أخرى.');
-      }
-    });
 
     // Subscribe to trial
     this.bot.action('subscribe_trial', async (ctx) => {
@@ -881,11 +1058,19 @@ class TelegramBot {
         console.error('Error answering callback query:', e.message);
       }
 
+      // Check if trial already used
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      if (user && user.trial_used && user.subscription_type !== 'تجربة مجانية') {
+        await ctx.reply('❌ <b>عذراً، لقد استنفذت حقك في التجربة المجانية سابقاً!</b>\n\nيرجى اختيار أحد خطط الاشتراك المدفوعة للاستمرار.', { parse_mode: 'HTML' });
+        await this.showSubscriptionPlans(ctx);
+        return;
+      }
+
       // Activate trial
       await db.activateTrial(ctx.from.id);
-      
+
       await ctx.reply('🎉 <b>تم تفعيل التجربة المجانية!</b>\n\n📅 لمدة 7 أيام\n✅ جميع المميزات متاحة\n\nاستمتع بالبوت!', { parse_mode: 'HTML' });
-      
+
       // Check channel subscription
       const channelSettings = await db.getChannelSettings();
       if (channelSettings && channelSettings.is_enabled) {
@@ -895,7 +1080,7 @@ class TelegramBot {
           return;
         }
       }
-      
+
       await this.showMainMenu(ctx);
     });
 
@@ -926,6 +1111,17 @@ class TelegramBot {
       }
 
       await this.showSubscriptionPlans(ctx);
+    });
+
+    // Buy plan (Redirect to Plisio)
+    this.bot.action(/^buy_plan_(.+)$/, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch (e) {
+        console.error('Error answering callback query:', e.message);
+      }
+      const planId = ctx.match[1];
+      await this.handleBuyPlan(ctx, planId);
     });
 
     // Notify admin about new user
@@ -993,7 +1189,7 @@ class TelegramBot {
         await ctx.reply('❌ المستخدم غير موجود');
         return;
       }
-      
+
       // Delete instance from Evolution API
       if (user.instance_name) {
         try {
@@ -1002,13 +1198,13 @@ class TelegramBot {
           console.error('Error deleting instance:', e.message);
         }
       }
-      
+
       // Update user in database
       await pool.query(
         "UPDATE users SET is_connected = false, instance_name = NULL, instance_token = NULL WHERE telegram_id = $1",
         [telegramId]
       );
-      
+
       await ctx.reply('✅ تم قطع اتصال المستخدم بنجاح!');
       await this.showUserDetails(ctx, telegramId);
     });
@@ -1017,10 +1213,46 @@ class TelegramBot {
   // Check if user is subscribed to channel
   async checkSubscription(ctx) {
     try {
-      const member = await ctx.telegram.getChatMember(this.channelUsername, ctx.from.id);
+      const settings = await db.getChannelSettings();
+      if (!settings || !settings.is_enabled || !settings.channel_link) {
+        return true; // Not required or not set
+      }
+
+      let channelId = settings.channel_link;
+
+      // Robust parsing of Telegram links
+      // Handle https://t.me/username
+      if (channelId.includes('t.me/')) {
+        const parts = channelId.split('t.me/');
+        const identifier = parts[1].split('/')[0].split('?')[0];
+
+        // If it's a joinchat or + format, it's a private link and cannot be verified by username
+        // The bot MUST be an admin in the channel to check members by ID/Username
+        if (identifier.startsWith('+') || identifier.startsWith('joinchat')) {
+          console.warn('⚠️ Cannot verify membership for private join links via getChatMember without numeric ID.');
+          // If we have a numeric ID saved in name or elsewhere we could use it, 
+          // but for now, we'll try to treat it as a public username if it doesn't have +
+          channelId = identifier;
+        } else {
+          channelId = '@' + identifier;
+        }
+      }
+
+      // If the link starts with @ already, use it
+      if (!channelId.startsWith('@') && !channelId.startsWith('-100') && !isNaN(channelId)) {
+        // Likely a numeric ID
+      } else if (!channelId.startsWith('@') && isNaN(channelId)) {
+        channelId = '@' + channelId;
+      }
+
+      const member = await ctx.telegram.getChatMember(channelId, ctx.from.id);
       return ['creator', 'administrator', 'member'].includes(member.status);
     } catch (error) {
-      console.error('Error checking subscription:', error);
+      console.error('Error checking subscription:', error.message);
+      // If error is "chat not found", it might be a private link problem
+      if (error.message.includes('chat not found')) {
+        console.error('❌ Bot cannot find the channel. Make sure the bot is an ADMIN in the channel/group.');
+      }
       return false;
     }
   }
@@ -1029,21 +1261,21 @@ class TelegramBot {
   async showSubscriptionRequired(ctx) {
     // Check if there's a custom channel set
     const channelSettings = await db.getChannelSettings();
-    
+
     // If channel subscription is not required, skip this screen
     if (!channelSettings || !channelSettings.is_enabled) {
       await this.showMainMenu(ctx);
       return;
     }
-    
+
     let channelLink = channelSettings.channel_link || `https://t.me/${this.channelUsername.replace('@', '')}`;
     let channelName = channelSettings.channel_name || 'القناة';
-    
+
     // Ensure channel link is a valid URL
     if (!channelLink.startsWith('http')) {
       channelLink = `https://t.me/${channelLink.replace('@', '')}`;
     }
-    
+
     let message = '🔐 <b>مرحباً بك في بوت واتساب الآلي!</b>\n\n';
     message += 'للاستخدام، يجب الاشتراك في ' + channelName + ' أولاً:\n\n';
     message += '📢 اضغط على الزر أدناه للاشتراك، ثم اضغط "تحقق من الاشتراك"';
@@ -1063,68 +1295,73 @@ class TelegramBot {
   async showMainMenu(ctx) {
     const user = await db.getUserByTelegramId(ctx.from.id);
     const subscription = await db.checkSubscriptionStatus(ctx.from.id);
+    const lang = user.language || 'ar';
 
     let message = '';
-    
+
     // Check subscription status
     if (!subscription.active) {
       // Show subscription required message
-      message = '🔐 <b>مرحباً بك في بوت واتساب الآلي!</b>\n\n';
-      message += '⚠️ <b>الاشتراك مطلوب للاستخدام</b>\n\n';
-      
+      message = t('subscription_required', lang) + '\n\n';
+      message += t('subscription_needed', lang) + '\n\n';
+
       if (subscription.reason === 'expired') {
-        message += '⏰ انتهت فترة الاشتراك\n\n';
+        message += t('expired', lang) + '\n\n';
       } else if (subscription.reason === 'inactive') {
-        message += '❌ الحساب غير نشط\n\n';
+        message += t('inactive', lang) + '\n\n';
       }
-      
-      message += '📋 <b>اختر خطة الاشتراك:</b>\n\n';
-      message += '🔹 <b>تجربة مجانية</b> - 7 أيام مجاناً\n';
-      message += '   ✅ جميع المميزات\n';
-      message += '🔹 <b>شهري</b> - 6.99$ (10,000 IQD)\n';
-      message += '   ✅ جميع المميزات + دعم\n';
-      message += '🔹 <b>سنوي</b> - 69$ (خصم 20%)\n';
-      message += '   ✅ جميع المميزات + دعم + خصم\n\n';
-      message += '💬 للاشتراك تواصل معنا:\n';
-      message += '📞 +447413076745\n\n';
-      message += '🔗 أو اشترك في القناة:\n';
+
+      if (user && !user.trial_used) {
+        message += t('trial', lang) + '\n';
+        message += t('all_features', lang) + '\n';
+      }
+
+      message += t('monthly', lang) + '\n';
+      message += t('features_plus_support', lang) + '\n';
+      message += t('yearly', lang) + '\n';
+      message += t('all_features_support_discount', lang) + '\n\n';
+      message += t('contact_to_subscribe', lang) + '\n';
+      message += '+447413076745\n\n';
+      message += t('or_subscribe_channel', lang) + '\n';
       message += 'https://t.me/mstoviral';
+
+      const buttons = [];
+      if (user && !user.trial_used) {
+        buttons.push([Markup.button.callback(t('trial_button', lang), 'subscribe_trial')]);
+      }
+      buttons.push([Markup.button.callback(t('renew_subscription', lang), 'renew_subscription')]);
+      buttons.push([Markup.button.callback(t('contact_button', lang), 'contact_admin')]);
 
       await ctx.reply(message, {
         parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [Markup.button.callback('🎁 تجربة مجانية 7 أيام', 'subscribe_trial')],
-            [Markup.button.callback('📞 تواصل للاشتراك', 'contact_admin')]
-          ]
-        }
+        reply_markup: { inline_keyboard: buttons }
       });
       return;
     }
 
     // User has active subscription
-    const expiresDate = new Date(subscription.expires).toLocaleDateString('ar');
-    message = `🎉 <b>مرحباً بك في بوت واتساب الآلي!</b>\n\n`;
-    message += `✅ <b>الاشتراك نشط:</b> ${subscription.type}\n`;
-    message += `📅 ينتهي: ${expiresDate}\n\n`;
-    message += `━━━━━━━━━━━━━━━\n\n`;
-    message += `<b>📋 المميزات المتاحة:</b>\n\n`;
-    message += `✅ ربط الواتساب\n`;
-    message += `✅ الردود التلقائية\n`;
-    message += `✅ الذكاء الاصطناعي\n`;
-    message += `✅ إرسال رسائل جماعية\n`;
-    message += `✅ إحصائيات مفصلة\n\n`;
-    message += `━━━━━━━━━━━━━━━`;
+    const expiresDate = new Date(subscription.expires).toLocaleDateString(lang === 'ar' ? 'ar-EG' : lang === 'fr' ? 'fr-FR' : lang === 'de' ? 'de-DE' : 'en-US');
+    message = t('welcome', lang) + '\n\n';
+    message += t('subscription_active', lang) + ' ' + subscription.type + '\n';
+    message += t('expires', lang) + ' ' + expiresDate + '\n\n';
+    message += '━━━━━━━━━━━━━━━\n\n';
+    message += t('features_available', lang) + '\n\n';
+    message += t('feature_whatsapp', lang) + '\n';
+    message += t('feature_autoreplies', lang) + '\n';
+    message += t('feature_ai', lang) + '\n';
+    message += t('feature_broadcast', lang) + '\n';
+    message += t('feature_stats', lang) + '\n\n';
+    message += '━━━━━━━━━━━━━━━';
 
     const buttons = [];
 
     if (!user.is_connected) {
-      buttons.push([Markup.button.callback('🔗 ربط واتساب', 'connect_whatsapp')]);
+      buttons.push([Markup.button.callback(t('connect_whatsapp', lang), 'connect_whatsapp')]);
     } else {
-      buttons.push([Markup.button.callback('📊 لوحة التحكم', 'dashboard')]);
+      buttons.push([Markup.button.callback(t('dashboard_title', lang), 'dashboard')]);
     }
 
-    buttons.push([Markup.button.callback('💳 تجديد الاشتراك', 'renew_subscription')]);
+    buttons.push([Markup.button.callback(t('renew_subscription', lang), 'renew_subscription')]);
 
     await ctx.reply(message, {
       parse_mode: 'HTML',
@@ -1135,19 +1372,19 @@ class TelegramBot {
   // Show subscription plans
   async showSubscriptionPlans(ctx) {
     const plans = await db.getSubscriptionPlans();
-    
+
     let message = '💳 <b>خطط الاشتراك</b>\n\n';
     message += '━━━━━━━━━━━━━━━\n';
 
     for (const plan of plans) {
-      const priceDisplay = plan.price_usd > 0 
-        ? `${plan.price_usd}$ / ${plan.price_iqd} IQD` 
+      const priceDisplay = plan.price_usd > 0
+        ? `${plan.price_usd}$ / ${plan.price_iqd} IQD`
         : 'مجاني';
-      
+
       message += `\n<b>${plan.name}</b>\n`;
       message += `⏰ المدة: ${plan.duration_days} يوم\n`;
       message += `💰 السعر: ${priceDisplay}\n`;
-      
+
       if (plan.features && plan.features.length > 0) {
         message += `✅ المميزات:\n`;
         plan.features.forEach(f => message += `   • ${f}\n`);
@@ -1158,16 +1395,94 @@ class TelegramBot {
     message += '\n💬 للاشتراك الشهري أو السنوي:\n';
     message += '📞 +447413076745';
 
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const buttons = [];
+
+    // Only show trial button if never used
+    if (user && !user.trial_used) {
+      buttons.push([Markup.button.callback('🎁 تجربة مجانية 7 أيام', 'subscribe_trial')]);
+    }
+
+    // Add buttons for each paid plan
+    for (const plan of plans) {
+      buttons.push([Markup.button.callback(`💳 ${plan.name} (${plan.price_usd}$)`, `buy_plan_${plan.id}`)]);
+    }
+
+    buttons.push([Markup.button.callback('📞 تواصل للاشتراك', 'contact_admin')]);
+    buttons.push([Markup.button.callback('🔙 رجوع', 'back_main')]);
+
     await ctx.reply(message, {
       parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          [Markup.button.callback('🎁 تجربة مجانية 7 أيام', 'subscribe_trial')],
-          [Markup.button.callback('📞 تواصل للاشتراك', 'contact_admin')],
-          [Markup.button.callback('🔙 رجوع', 'back_main')]
-        ]
-      }
+      reply_markup: { inline_keyboard: buttons }
     });
+  }
+
+  // Handle Buy Plan
+  async handleBuyPlan(ctx, planId) {
+    const telegramId = ctx.from.id;
+    const user = await db.getUserByTelegramId(telegramId);
+    const lang = user.language || 'ar';
+
+    try {
+      const plan = await db.getSubscriptionPlan(planId);
+      if (!plan) {
+        await ctx.reply('❌ Plan not found');
+        return;
+      }
+
+      // Check for existing pending invoice
+      const existingInvoice = await db.getPendingInvoice(telegramId, planId);
+      if (existingInvoice) {
+        await ctx.reply(t('payment_already_exists', lang), {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [Markup.button.url(t('pay_with_crypto', lang), existingInvoice.invoice_url)],
+              [Markup.button.callback(t('back', lang), 'renew_subscription')]
+            ]
+          }
+        });
+        return;
+      }
+
+      const baseUrl = process.env.BASE_URL || 'https://bot.magicaikrd.com';
+      const callbackUrl = `${baseUrl}/api/payment/plisio-webhook`;
+
+      const invoice = await plisioService.createInvoice({
+        order_number: `${telegramId}:${planId}`,
+        amount: plan.price_usd,
+        order_name: `Subscription: ${plan.name}`,
+        callback_url: callbackUrl,
+        success_url: `https://t.me/${ctx.botInfo.username}`
+      });
+
+      // Save invoice to database
+      // Plisio invoice expires in 1 hour by default
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 1);
+
+      await db.savePaymentInvoice(
+        telegramId,
+        planId,
+        invoice.invoice_url,
+        invoice.txn_id || invoice.id, // txn_id is Plisio's ID
+        expiresAt
+      );
+
+      await ctx.reply(t('payment_link_sent', lang), {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.url(t('pay_with_crypto', lang), invoice.invoice_url)],
+            [Markup.button.callback(t('back', lang), 'renew_subscription')]
+          ]
+        }
+      });
+
+    } catch (error) {
+      console.error('Error creating Plisio invoice:', error.message);
+      await ctx.reply('❌ <b>حدث خطأ أثناء إنشاء رابط الدفع</b>\nالرجاء المحاولة مرة أخرى لاحقاً أو التواصل مع الدعم.', { parse_mode: 'HTML' });
+    }
   }
 
   // Admin Panel
@@ -1175,19 +1490,19 @@ class TelegramBot {
     let message = '🛠 <b>لوحة الأدمن</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
     message += '📊 <b>إحصائيات النظام:</b>\n\n';
-    
+
     // Get stats
     const totalUsers = await pool.query('SELECT COUNT(*) as count FROM users');
     const connectedUsers = await pool.query('SELECT COUNT(*) as count FROM users WHERE is_connected = true');
     const totalContacts = await pool.query('SELECT COUNT(*) as count FROM contacts');
     const totalBroadcasts = await pool.query('SELECT COUNT(*) as count FROM broadcasts');
-    
+
     message += `👥 إجمالي المستخدمين: ${totalUsers.rows[0].count}\n`;
     message += `✅ المتصلين: ${connectedUsers.rows[0].count}\n`;
     message += `📱 جهات الاتصال: ${totalContacts.rows[0].count}\n`;
     message += `📢 البرودكاست: ${totalBroadcasts.rows[0].count}\n`;
     message += '\n━━━━━━━━━━━━━━━━━━━━━\n';
-    
+
     // Get channel subscription status
     const channelSettings = await db.getChannelSettings();
     if (channelSettings && channelSettings.is_enabled) {
@@ -1244,7 +1559,7 @@ class TelegramBot {
     message += `• الحالة: يعمل بنجاح\n`;
     message += '\n━━━━━━━━━━━━━━━━━━━━━\n';
     message += '📊 <b>إعدادات الاشتراك:</b>\n\n';
-    
+
     const channelSettings = await db.getChannelSettings();
     if (channelSettings && channelSettings.is_enabled) {
       message += `✅ الاشتراك الإجباري: مفعل\n`;
@@ -1256,7 +1571,7 @@ class TelegramBot {
     const activeSubscriptions = await pool.query("SELECT COUNT(*) as count FROM users WHERE subscription_status = 'active'");
     const trialUsers = await pool.query("SELECT COUNT(*) as count FROM users WHERE subscription_type = 'تجربة مجانية'");
     const expiredUsers = await pool.query("SELECT COUNT(*) as count FROM users WHERE subscription_status = 'expired'");
-    
+
     message += '\n📈 <b>إحصائيات الاشتراكات:</b>\n\n';
     message += `✅ النشطون: ${activeSubscriptions.rows[0].count}\n`;
     message += `🎁 التجربة المجانية: ${trialUsers.rows[0].count}\n`;
@@ -1278,17 +1593,17 @@ class TelegramBot {
   // Show subscription plans management
   async showSubscriptionPlansManagement(ctx) {
     const plans = await db.getSubscriptionPlans();
-    
+
     let message = '💳 <b>إدارة خطط الاشتراك</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
 
     const keyboard = [];
 
     for (const plan of plans) {
-      const priceDisplay = plan.price_usd > 0 
-        ? `${plan.price_usd}$ / ${plan.price_iqd} IQD` 
+      const priceDisplay = plan.price_usd > 0
+        ? `${plan.price_usd}$ / ${plan.price_iqd} IQD`
         : 'مجاني';
-      
+
       message += `\n<b>${plan.name}</b>\n`;
       message += `💰 السعر: ${priceDisplay}\n`;
       message += `⏰ المدة: ${plan.duration_days} يوم\n`;
@@ -1316,7 +1631,7 @@ class TelegramBot {
   // Show activate user subscription
   async showActivateUserSubscription(ctx) {
     const users = await pool.query('SELECT telegram_id, telegram_username, subscription_type, subscription_status, subscription_expires FROM users ORDER BY created_at DESC LIMIT 10');
-    
+
     let message = '👤 <b>تفعيل اشتراك مستخدم</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
     message += 'اختر المستخدم لتفعيل اشتراكه:\n';
@@ -1347,10 +1662,10 @@ class TelegramBot {
   // Channel Subscription Settings
   async showChannelSettings(ctx) {
     const settings = await db.getChannelSettings();
-    
+
     let message = '📢 <b>إعداد الاشتراك الإجباري</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
-    
+
     if (settings && settings.is_enabled) {
       message += `✅ <b>الحالة:</b> مفعل\n`;
       message += `📛 <b>الاسم:</b> ${settings.channel_name || 'غير محدد'}\n`;
@@ -1358,7 +1673,7 @@ class TelegramBot {
     } else {
       message += `❌ <b>الحالة:</b> معطل\n`;
     }
-    
+
     message += '\n━━━━━━━━━━━━━━━━━━━━━\n';
     message += '<b>اختر الإجراء:</b>';
 
@@ -1377,10 +1692,10 @@ class TelegramBot {
   // Show Admin Users
   async showAdminUsers(ctx) {
     const users = await pool.query('SELECT telegram_id, telegram_username, is_connected, created_at FROM users ORDER BY created_at DESC LIMIT 20');
-    
+
     let message = '👥 <b>إدارة المستخدمين</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
-    
+
     if (users.rows.length === 0) {
       message += 'لا يوجد مستخدمين بعد';
     } else {
@@ -1400,7 +1715,7 @@ class TelegramBot {
 
     // Get all users for selection
     const allUsers = await pool.query('SELECT telegram_id, telegram_username, is_connected, instance_name, is_verified FROM users ORDER BY created_at DESC LIMIT 50');
-    
+
     // Create buttons for each user
     const userButtons = [];
     for (let i = 0; i < Math.min(allUsers.rows.length, 10); i++) {
@@ -1424,7 +1739,7 @@ class TelegramBot {
   // Show User Details
   async showUserDetails(ctx, telegramId) {
     const user = await db.getUserByTelegramId(telegramId);
-    
+
     if (!user) {
       await ctx.reply('❌ المستخدم غير موجود');
       return;
@@ -1439,11 +1754,11 @@ class TelegramBot {
     message += `🆔 <b>معرف التلغرام:</b> ${user.telegram_id}\n\n`;
     message += `👤 <b>اسم المستخدم:</b> ${user.telegram_username || 'غير محدد'}\n\n`;
     message += `📱 <b>حالة الواتساب:</b> ${user.is_connected ? '✅ متصل' : '❌ غير متصل'}\n\n`;
-    
+
     if (user.instance_name) {
       message += `📡 <b>اسم_INSTANCE:</b> ${user.instance_name}\n\n`;
     }
-    
+
     message += `✅ <b>التحقق:</b> ${user.is_verified ? '✅ مُتحقق' : '❌ غير مُتحقق'}\n\n`;
     message += `📅 <b>تاريخ التسجيل:</b> ${new Date(user.created_at).toLocaleDateString('ar')}\n\n`;
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
@@ -1600,7 +1915,7 @@ class TelegramBot {
 
         if (state === 'open' || state === 'CONNECTED') {
           console.log(`✅ Instance ${instanceName} is already connected.`);
-          
+
           // Use phone number from parameter or database, not from Evolution API
           let phoneNum = phoneNumber;
           if (!phoneNum) {
@@ -1608,7 +1923,7 @@ class TelegramBot {
             phoneNum = userCheck.phone_number || statusData.instance?.owner || null;
           }
           console.log(`📱 Phone number: ${phoneNum}`);
-          
+
           try {
             await db.updateUserConnection(telegramId, true, phoneNum);
             console.log(`✅ Phone number saved: ${phoneNum}`);
@@ -1663,7 +1978,7 @@ class TelegramBot {
             // Get phone number from user input or database
             const user = await db.getUserByTelegramId(telegramId);
             const userPhone = user.phone_number || null;
-            
+
             // Start polling for connection status
             this.startConnectionPolling(ctx, instanceName, telegramId, userPhone);
           } else {
@@ -1776,33 +2091,36 @@ class TelegramBot {
   // Show dashboard
   async showDashboard(ctx) {
     const user = await db.getUserByTelegramId(ctx.from.id);
+    const lang = user.language || 'ar';
 
     if (!user.is_connected) {
-      await ctx.reply('❌ لم تقم بربط واتساب بعد!');
+      await ctx.reply(t('not_connected', lang));
       await this.showMainMenu(ctx);
       return;
     }
 
     const stats = await db.getUserStats(user.id);
 
-    const lang = user.language || 'ar';
     const message = `
 ${t('dashboard_title', lang)}
 
-📱 ${lang === 'ar' ? 'الرقم' : 'Number'}: ${user.phone_number || 'N/A'}
-✅ ${lang === 'ar' ? 'الحالة: متصل' : 'Status: Connected'}
+📱 ${t('phone_number', lang)}: ${user.phone_number || 'N/A'}
+${t('status_connected', lang)}
 
 📈 ${t('statistics', lang)}:
-👥 ${t('dashboard_contacts', lang) || (lang === 'ar' ? 'جهات الاتصال' : 'Contacts')}: ${stats.totalContacts}
+👥 ${t('contacts', lang)}: ${stats.totalContacts}
 🤖 ${t('auto_replies', lang)}: ${stats.activeAutoReplies}
 📢 ${t('broadcast', lang)}: ${stats.totalBroadcasts}
     `;
 
     await ctx.reply(message, Markup.inlineKeyboard([
       [Markup.button.callback(t('auto_replies', lang), 'auto_replies')],
-      [Markup.button.callback(t('ai_settings', lang), 'ai_settings')],
       [Markup.button.callback(t('broadcast', lang), 'broadcast')],
+      [Markup.button.callback(lang === 'ar' ? '🧠 إعدادات الذكاء الاصطناعي' : '🧠 AI Settings', 'ai_settings')],
+      [Markup.button.callback(lang === 'ar' ? '📥 تصدير الطلبات (Excel)' : '📥 Export Orders (Excel)', 'export_orders')],
+      [Markup.button.callback(lang === 'ar' ? '🏪 إعدادات المتجر (الفواتير)' : '🏪 Store Settings (Invoices)', 'store_settings')],
       [Markup.button.callback(t('change_language', lang), 'change_language')],
+      [Markup.button.callback('📊 تقارير الطلبات', 'order_reports')],
       [Markup.button.callback(t('statistics', lang), 'statistics')],
       [Markup.button.callback(t('disconnect', lang), 'disconnect')]
     ]));
@@ -1835,13 +2153,16 @@ ${t('dashboard_title', lang)}
     // Handle different conversation flows
     if (state.action === 'add_auto_reply') {
       const handlers = require('./handlers');
-      await handlers.handleAddAutoReply(ctx, this);
+      await handlers.handleAddAutoReply(ctx, state, this);
     } else if (state.action === 'setup_ai') {
       const handlers = require('./handlers');
       await handlers.handleSetupAI(ctx, this);
     } else if (state.action === 'setup_gemini') {
       const handlers = require('./handlers');
       await handlers.handleSetupGemini(ctx, this);
+    } else if (state.action === 'setup_chatgpt') {
+      const handlers = require('./handlers');
+      await handlers.handleSetupChatGPT(ctx, this);
     } else if (state.action === 'train_ai') {
       const handlers = require('./handlers');
       await handlers.handleTrainAI(ctx, this);
@@ -1920,23 +2241,23 @@ ${t('dashboard_title', lang)}
       // Admin activating user subscription
       const telegramId = ctx.message.text.trim();
       const planId = state.planId;
-      
+
       // Validate telegram ID
       if (isNaN(telegramId)) {
         await ctx.reply('❌ يرجى إدخال معرف صحيح (أرقام فقط)');
         return;
       }
-      
+
       const user = await db.getUserByTelegramId(telegramId);
       if (!user) {
         await ctx.reply('❌ المستخدم غير موجود');
         this.userStates.delete(ctx.from.id);
         return;
       }
-      
+
       await db.activateSubscription(telegramId, planId);
       this.userStates.delete(ctx.from.id);
-      
+
       await ctx.reply('✅ <b>تم تفعيل الاشتراك بنجاح!</b>\n\n📋 للمستخدم: ' + (user.telegram_username || telegramId), { parse_mode: 'HTML' });
       await this.showActivateUserSubscription(ctx);
     } else if (state.action === 'admin_add_plan') {
@@ -1988,7 +2309,7 @@ ${t('dashboard_title', lang)}
         await ctx.reply('📝 أدخل مميزات الخطة مفصولة بفواصل:\nمثال: مميزة1,ميزة2,ميزة3');
       } else if (state.step === 'features') {
         const features = ctx.message.text.split(',').map(f => f.trim());
-        
+
         await db.addSubscriptionPlan(
           state.planName,
           state.planNameEn,
@@ -1998,7 +2319,7 @@ ${t('dashboard_title', lang)}
           state.planPriceIqd,
           features
         );
-        
+
         this.userStates.delete(ctx.from.id);
         await ctx.reply('✅ <b>تم إضافة الخطة بنجاح!</b>', { parse_mode: 'HTML' });
         await this.showSubscriptionPlansManagement(ctx);
@@ -2052,7 +2373,7 @@ ${t('dashboard_title', lang)}
         await ctx.reply('📝 أدخل مميزات الخطة مفصولة بفواصل:\nمثال: مميزة1,ميزة2,ميزة3');
       } else if (state.step === 'features') {
         const features = ctx.message.text.split(',').map(f => f.trim());
-        
+
         await db.updateSubscriptionPlan(
           state.planId,
           state.planName,
@@ -2063,10 +2384,40 @@ ${t('dashboard_title', lang)}
           state.planPriceIqd,
           features
         );
-        
+
         this.userStates.delete(ctx.from.id);
         await ctx.reply('✅ <b>تم تحديث الخطة بنجاح!</b>', { parse_mode: 'HTML' });
         await this.showSubscriptionPlansManagement(ctx);
+      }
+    } else if (state.action === 'set_store_name') {
+      if (state.step === 'input') {
+        const storeName = ctx.message.text.trim();
+        if (storeName.length < 2 || storeName.length > 50) {
+          await ctx.reply('❌ اسم المتجر يجب أن يكون بين 2 و 50 حرفاً.');
+          return;
+        }
+
+        const user = await db.getUserByTelegramId(ctx.from.id);
+        await db.updateUserStoreName(user.telegram_id, storeName);
+
+        this.userStates.delete(ctx.from.id);
+        await ctx.reply('✅ <b>تم حفظ اسم المتجر بنجاح!</b>\n\nستظهر الآن " ' + storeName + ' " في جميع فواتير الـ PDF الجديدة.', { parse_mode: 'HTML' });
+        await this.showStoreSettings(ctx);
+      }
+    } else if (state.action === 'set_google_maps') {
+      if (state.step === 'input') {
+        const link = ctx.message.text.trim();
+        if (!link.includes('http') || !link.includes('map')) {
+          await ctx.reply('❌ يرجى إرسال رابط صحيح لخرائط جوجل.');
+          return;
+        }
+
+        const user = await db.getUserByTelegramId(ctx.from.id);
+        await db.setUserGoogleMapsLink(user.telegram_id, link);
+
+        this.userStates.delete(ctx.from.id);
+        await ctx.reply('✅ <b>تم حفظ رابط الموقع بنجاح!</b>\n\nسيتم إرساله للعملاء عند اكتمال الطلب.', { parse_mode: 'HTML' });
+        await this.showStoreSettings(ctx);
       }
     }
   }
@@ -2075,53 +2426,53 @@ ${t('dashboard_title', lang)}
   async handleBroadcastDateInput(ctx, state) {
     const text = ctx.message.text.trim();
     const handlers = require('./handlers');
-    
+
     // Check for quick filters (numbers)
     if (!isNaN(text) && parseInt(text) > 0) {
       const days = parseInt(text);
       const to = new Date();
       const from = new Date();
       from.setDate(from.getDate() - days);
-      
+
       const dateFrom = from.toISOString().split('T')[0];
       const dateTo = to.toISOString().split('T')[0];
-      
+
       state.dateFrom = dateFrom;
       state.dateTo = dateTo;
       state.filter = { dateFrom, dateTo };
       this.userStates.set(ctx.from.id, state);
-      
+
       await ctx.reply(`✅ تم تحديد الفترة: آخر ${days} يوم\nمن: ${dateFrom}\nإلى: ${dateTo}`);
       await handlers.confirmBroadcast(ctx, state.filter, this);
       return;
     }
-    
+
     // Parse date input (DD/MM/YYYY)
     const dateMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    
+
     if (!dateMatch) {
       await ctx.reply('❌ تنسيق التاريخ غير صحيح.\nالرجاء استخدام التنسيق: DD/MM/YYYY\nمثال: 01/01/2026');
       return;
     }
-    
+
     const day = parseInt(dateMatch[1]);
     const month = parseInt(dateMatch[2]);
     const year = parseInt(dateMatch[3]);
-    
+
     // Validate date
     if (day < 1 || day > 31 || month < 1 || month > 12 || year < 2020) {
       await ctx.reply('❌ تاريخ غير صالح. الرجاء إدخال تاريخ صحيح.');
       return;
     }
-    
+
     const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
-    
+
     if (state.dateStep === 'from') {
       // First date (from)
       state.dateFrom = dateStr;
       state.dateStep = 'to';
       this.userStates.set(ctx.from.id, state);
-      
+
       await ctx.reply(
         `✅ تاريخ البداية: ${dateStr}\n\n` +
         'الآن أرسل تاريخ النهاية (DD/MM/YYYY):\n' +
@@ -2132,7 +2483,7 @@ ${t('dashboard_title', lang)}
       state.dateTo = dateStr;
       state.filter = { dateFrom: state.dateFrom, dateTo: dateStr };
       this.userStates.set(ctx.from.id, state);
-      
+
       await ctx.reply(`✅ تم تحديد الفترة:\nمن: ${state.dateFrom}\nإلى: ${dateStr}`);
       await handlers.confirmBroadcast(ctx, state.filter, this);
     }
@@ -2195,7 +2546,7 @@ ${t('dashboard_title', lang)}
     // Validate Phone Number (must include country code)
     // Remove any spaces or special characters
     const cleanPhone = phoneNumber.replace(/[\s\-\(\)]/g, '');
-    
+
     // Check if it starts with + or 00 or country code
     if (!/^(\+|00|0)/.test(cleanPhone)) {
       await ctx.reply('❌ رقم الهاتف يجب أن يتضمن مفتاح الدولة!\nمثال: +9677xxxxxxxx أو 009677xxxxxxxx');
@@ -2307,7 +2658,7 @@ ${t('dashboard_title', lang)}
     try {
       const state = this.userStates.get(ctx.from.id);
       console.log('📤 executeBroadcast - State:', JSON.stringify(state));
-      
+
       if (!state || !state.recipients) {
         console.error('❌ No state or recipients found');
         await ctx.reply('❌ حدث خطأ. لم يتم العثور على قائمة المستلمين. يرجى المحاولة مرة أخرى.');
@@ -2321,7 +2672,7 @@ ${t('dashboard_title', lang)}
 
       const user = await db.getUserByTelegramId(ctx.from.id);
       console.log('📤 User:', user.telegram_id, 'Instance:', user.instance_name);
-      
+
       if (!user.instance_name) {
         await ctx.reply('❌ حساب الواتساب غير متصل. يرجى ربط الواتساب أولاً.');
         return;
@@ -2396,19 +2747,73 @@ ${t('dashboard_title', lang)}
   // Handle photo messages
   async handlePhotoMessage(ctx) {
     const state = this.userStates.get(ctx.from.id);
-    if (state && state.action === 'broadcast' && state.step === 'media') {
-      const handlers = require('./handlers');
+    if (!state) return;
+
+    const handlers = require('./handlers');
+    if (state.action === 'broadcast' && state.step === 'media') {
       await handlers.handleBroadcastFlow(ctx, state, this);
+    } else if (state.action === 'add_auto_reply' && state.step === 'media_upload') {
+      await handlers.handleAddAutoReply(ctx, state, this);
     }
   }
 
   // Handle video messages
   async handleVideoMessage(ctx) {
     const state = this.userStates.get(ctx.from.id);
-    if (state && state.action === 'broadcast' && state.step === 'media') {
-      const handlers = require('./handlers');
+    if (!state) return;
+
+    const handlers = require('./handlers');
+    if (state.action === 'broadcast' && state.step === 'media') {
       await handlers.handleBroadcastFlow(ctx, state, this);
+    } else if (state.action === 'add_auto_reply' && state.step === 'media_upload') {
+      await handlers.handleAddAutoReply(ctx, state, this);
     }
+  }
+
+  // Show document message handler
+  async handleDocumentMessage(ctx) {
+    const state = this.userStates.get(ctx.from.id);
+    if (!state) return;
+
+    const handlers = require('./handlers');
+    if (state.action === 'add_auto_reply' && state.step === 'media_upload') {
+      await handlers.handleAddAutoReply(ctx, state, this);
+    }
+  }
+
+  // Show Store Settings
+  async showStoreSettings(ctx) {
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    const lang = user.language || 'ar';
+    const storeName = user.store_name || (lang === 'ar' ? 'غير محدد' : 'Not set');
+    const googleMapsLink = await db.getUserGoogleMapsLink(user.telegram_id);
+
+    let message = lang === 'ar'
+      ? `🏪 <b>إعدادات المتجر والفواتير</b>\n\n`
+      : `🏪 <b>Store & Invoice Settings</b>\n\n`;
+
+    message += lang === 'ar'
+      ? `🏭 <b>اسم المتجر الحالي:</b> ${storeName}\n`
+      : `🏭 <b>Current Store Name:</b> ${storeName}\n`;
+
+    message += lang === 'ar'
+      ? `📍 <b>رابط الموقع:</b> ${googleMapsLink ? '✅ تم الضبط' : '❌ غير محدد'}\n`
+      : `📍 <b>Location Link:</b> ${googleMapsLink ? '✅ Set' : '❌ Not Set'}\n`;
+
+    message += lang === 'ar'
+      ? `\nاسم المتجر هو الذي سيظهر في ترويسة فواتير الـ PDF التي يرسلها البوت للعملاء.\nرابط الموقع سيتم إرساله للعميل عند اكتمال الطلب.`
+      : `\nThe store name will appear in the header of the PDF invoices sent to customers.\nThe location link will be sent to the customer upon order completion.`;
+
+    await ctx.reply(message, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: lang === 'ar' ? '✏️ تعديل اسم المتجر' : '✏️ Edit Store Name', callback_data: 'set_store_name' }],
+          [{ text: lang === 'ar' ? '📍 تعيين رابط جوجل ماب' : '📍 Set Google Maps Link', callback_data: 'set_google_maps' }],
+          [{ text: lang === 'ar' ? '🔙 رجوع' : '🔙 Back', callback_data: 'back_dashboard' }]
+        ]
+      }
+    });
   }
 
   // Launch bot
@@ -2425,6 +2830,33 @@ ${t('dashboard_title', lang)}
   // Get bot instance
   getBot() {
     return this.bot;
+  }
+
+  async handleExportOrders(ctx) {
+    try {
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      const orders = await db.getOrders(user.id);
+
+      if (!orders || orders.length === 0) {
+        await ctx.reply('⚠️ لا توجد طلبات لتصديرها حالياً.');
+        return;
+      }
+
+      await ctx.reply('⏳ جاري تجهيز ملف الإكسل...');
+
+      const filePath = await excelService.generateOrdersExport(orders, `orders_${user.id}.xlsx`);
+
+      await ctx.replyWithDocument({ source: filePath, filename: 'الطلبات.xlsx' }, {
+        caption: `📊 <b>تقرير الطلبات</b>\n\nإجمالي الطلبات: ${orders.length}`,
+        parse_mode: 'HTML'
+      });
+
+      // Delete file after sending
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      console.error('Error exporting orders:', error);
+      await ctx.reply('❌ حدث خطأ أثناء تصدير الطلبات. يرجى المحاولة لاحقاً.');
+    }
   }
 }
 
