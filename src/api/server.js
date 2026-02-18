@@ -140,6 +140,19 @@ class APIServer {
       res.send(templates.renderTerms(lang));
     });
 
+    // Evolution API Webhook - receives WhatsApp events (messages, connection updates, etc.)
+    this.app.post('/webhook/evolution/:instanceName', async (req, res) => {
+      try {
+        const { instanceName } = req.params;
+        console.log(`📥 Evolution Webhook received for instance: ${instanceName}`);
+        await this.handleEvolutionWebhook(instanceName, req.body);
+        res.status(200).send('OK');
+      } catch (error) {
+        console.error('❌ Evolution Webhook Error:', error.message);
+        res.status(500).send('Error');
+      }
+    });
+
     // Plisio Payment Webhook
     this.app.post('/api/payment/plisio-webhook', async (req, res) => {
       try {
