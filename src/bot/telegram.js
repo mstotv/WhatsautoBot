@@ -492,15 +492,27 @@ class TelegramBot {
       await handlers.showStatistics(ctx);
     });
 
-    // Disconnect
+    // Disconnect with confirmation
     this.bot.action('disconnect', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      const handlers = require('./handlers');
-      await handlers.handleDisconnect(ctx);
+      } catch (e) { }
+
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      const lang = user.language || 'ar';
+
+      await ctx.reply(
+        lang === 'ar' ? '⚠️ <b>هل أنت متأكد من رغبتك في قطع الاتصال؟</b>\n\nسيتم إيقاف معالجة الرسائل والرد التلقائي حتى تقوم بإعادة الربط.' : '⚠️ <b>Are you sure you want to disconnect?</b>\n\nMessage processing and auto-replies will stop until you reconnect.',
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [Markup.button.callback(lang === 'ar' ? '✅ نعم، اقطع الاتصال' : '✅ Yes, Disconnect', 'confirm_disconnect')],
+              [Markup.button.callback(lang === 'ar' ? '❌ إلغاء' : '❌ Cancel', 'dashboard')]
+            ]
+          }
+        }
+      );
     });
 
     // Back to Dashboard
@@ -707,15 +719,20 @@ class TelegramBot {
       await ctx.reply('🧪 <b>اختبار الذكاء الاصطناعي</b>\n\nأرسل رسالة للذكاء الاصطناعي للرد عليها:', { parse_mode: 'HTML' });
     });
 
-    // Save Enhanced Prompt
-    this.bot.action(/save_enhanced_(.+)/, async (ctx) => {
+    // Save Enhanced Prompt (Updated to read from state)
+    this.bot.action('save_enhanced', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
+      } catch (e) { }
+
+      const state = this.userStates.get(ctx.from.id);
+      const enhancedText = state?.enhancedPrompt;
+
+      if (!enhancedText) {
+        await ctx.reply('❌ لم يتم العثور على نص محسّن لحفظه.');
+        return;
       }
 
-      const enhancedText = ctx.match[1];
       const user = await db.getUserByTelegramId(ctx.from.id);
       const aiSettings = await db.getAISettings(user.id);
 
@@ -727,6 +744,13 @@ class TelegramBot {
       await db.setAISettings(user.id, aiSettings.provider, aiSettings.api_key, aiSettings.model, enhancedText);
 
       await ctx.reply('✅ <b>تم حفظ النص المحسّن بنجاح!</b>', { parse_mode: 'HTML' });
+
+      // Clean up state
+      if (state) {
+        delete state.enhancedPrompt;
+        this.userStates.set(ctx.from.id, state);
+      }
+
       const handlers = require('./handlers');
       await handlers.showAISettings(ctx);
     });
@@ -809,11 +833,37 @@ class TelegramBot {
     this.bot.action('broadcast_all', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
+      } catch (e) { }
+
+      const state = this.userStates.get(ctx.from.id);
+      if (!state) {
+        await ctx.reply('❌ انتهت الجلسة، يرجى البدء من جديد.');
+        return;
       }
-      const handlers = require('./handlers');
-      await handlers.confirmBroadcast(ctx, 'all', this);
+
+      // Initialize recipients with all contacts
+      const user = await db.getUserByTelegramId(ctx.from.id);
+      const contacts = await db.getContacts(user.id);
+
+      if (contacts.length === 0) {
+        await ctx.reply('❌ لا يوجد لديك جهات اتصال للإرسال إليها.');
+        return;
+      }
+
+      state.recipients = contacts;
+      state.filter = { type: 'all' };
+      this.userStates.set(ctx.from.id, state);
+
+      // Confirm before execution
+      await ctx.reply(`📢 <b>تأكيد إرسال البرودكاست</b>\n\nعدد المستلمين: ${contacts.length}\nسيتم الإرسال للجميع الآن.`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback('🚀 إرسال الآن', 'broadcast_send_now')],
+            [Markup.button.callback('🔙 تراجع', 'broadcast')]
+          ]
+        }
+      });
     });
 
     // Broadcast by date range
@@ -957,33 +1007,41 @@ class TelegramBot {
     this.bot.action('admin_activate_trial', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: 1 });
-      await ctx.reply('أرسل معرف المستخدم (Telegram ID) لتفعيل التجربة المجانية:');
+      } catch (e) { }
+
+      const plans = await db.getSubscriptionPlans();
+      const trialPlan = plans.find(p => p.price_usd === 0) || plans[0];
+
+      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: trialPlan.id });
+      await ctx.reply(`أرسل معرف المستخدم (Telegram ID) لتفعيل الخطة: ${trialPlan.name}`);
     });
 
     // Admin: Activate monthly for user
     this.bot.action('admin_activate_monthly', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: 2 });
-      await ctx.reply('أرسل معرف المستخدم (Telegram ID) لتفعيل الاشتراك الشهري:');
+      } catch (e) { }
+
+      const plans = await db.getSubscriptionPlans();
+      // Find a plan with duration ~30 days, or just use the second plan
+      const monthlyPlan = plans.find(p => p.duration_days > 7 && p.duration_days <= 31) || plans[1] || plans[0];
+
+      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: monthlyPlan.id });
+      await ctx.reply(`أرسل معرف المستخدم (Telegram ID) لتفعيل الخطة: ${monthlyPlan.name}`);
     });
 
     // Admin: Activate yearly for user
     this.bot.action('admin_activate_yearly', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: 3 });
-      await ctx.reply('أرسل معرف المستخدم (Telegram ID) لتفعيل الاشتراك السنوي:');
+      } catch (e) { }
+
+      const plans = await db.getSubscriptionPlans();
+      // Find the plan with longest duration
+      const yearlyPlan = [...plans].sort((a, b) => b.duration_days - a.duration_days)[0];
+
+      this.userStates.set(ctx.from.id, { action: 'admin_activate_subscription', planId: yearlyPlan.id });
+      await ctx.reply(`أرسل معرف المستخدم (Telegram ID) لتفعيل الخطة: ${yearlyPlan.name}`);
     });
 
     // Admin: Add new subscription plan
@@ -1191,10 +1249,9 @@ class TelegramBot {
     this.bot.action('confirm_disconnect', async (ctx) => {
       try {
         await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      await this.confirmDisconnect(ctx);
+      } catch (e) { }
+      const handlers = require('./handlers');
+      await handlers.handleDisconnect(ctx);
     });
 
     // Admin: View User Details
@@ -1723,15 +1780,18 @@ class TelegramBot {
 
   // Show Admin Users
   async showAdminUsers(ctx) {
-    const users = await pool.query('SELECT telegram_id, telegram_username, is_connected, is_verified, instance_name, created_at FROM users ORDER BY created_at DESC LIMIT 20');
+    // Get users for display and for buttons in a single query (limit to 50 but we'll use 20 for list and 10 for buttons)
+    const usersResult = await pool.query('SELECT telegram_id, telegram_username, is_connected, is_verified, instance_name, created_at FROM users ORDER BY created_at DESC LIMIT 50');
+    const users = usersResult.rows;
 
     let message = '👥 <b>إدارة المستخدمين</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
 
-    if (users.rows.length === 0) {
+    if (users.length === 0) {
       message += 'لا يوجد مستخدمين بعد';
     } else {
-      users.rows.forEach((user, index) => {
+      // Show first 20 users in the text list
+      users.slice(0, 20).forEach((user, index) => {
         const status = user.is_connected ? '✅ متصل' : '❌ غير متصل';
         const verified = user.is_verified ? '✅ مُتحقق' : '❌ غير مُتحقق';
         message += `${index + 1}. ${user.telegram_username || 'بدون اسم'}\n`;
@@ -1745,16 +1805,12 @@ class TelegramBot {
       });
     }
 
-    // Get all users for selection
-    const allUsers = await pool.query('SELECT telegram_id, telegram_username, is_connected, instance_name, is_verified FROM users ORDER BY created_at DESC LIMIT 50');
-
-    // Create buttons for each user
+    // Create buttons for first 10 users
     const userButtons = [];
-    for (let i = 0; i < Math.min(allUsers.rows.length, 10); i++) {
-      const user = allUsers.rows[i];
+    users.slice(0, 10).forEach(user => {
       const name = user.telegram_username || user.telegram_id;
       userButtons.push([Markup.button.callback(`👤 ${name}`, `admin_user_${user.telegram_id}`)]);
-    }
+    });
 
     await ctx.reply(message, {
       parse_mode: 'HTML',
@@ -2742,31 +2798,6 @@ ${t('status_connected', lang)}
     } catch (error) {
       console.error('Error executing broadcast:', error);
       await ctx.reply('❌ حدث خطأ أثناء الإرسال. الرجاء المحاولة مرة أخرى.');
-    }
-  }
-
-  // Confirm disconnect
-  async confirmDisconnect(ctx) {
-    try {
-      const user = await db.getUserByTelegramId(ctx.from.id);
-
-      if (user.instance_name) {
-        // Delete instance from Evolution API
-        await evolutionAPI.deleteInstance(user.instance_name);
-      }
-
-      // Update user in database
-      await db.updateUserConnection(ctx.from.id, false);
-      await pool.query(
-        'UPDATE users SET instance_name = NULL, instance_token = NULL, phone_number = NULL WHERE telegram_id = $1',
-        [ctx.from.id]
-      );
-
-      await ctx.reply('✅ تم قطع الاتصال بنجاح!\n\nيمكنك إعادة الربط في أي وقت.');
-      await this.showMainMenu(ctx);
-    } catch (error) {
-      console.error('Error disconnecting:', error);
-      await ctx.reply('❌ حدث خطأ أثناء قطع الاتصال.');
     }
   }
 

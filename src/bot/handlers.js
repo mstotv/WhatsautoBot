@@ -386,10 +386,17 @@ async function handleTrainAI(ctx, telegramBot) {
       );
 
       await ctx.reply('✨ النتيجة:\n\n' + result.reply);
+
+      // Store in state to avoid callback_data size limits (64 bytes)
+      telegramBot.userStates.set(ctx.from.id, {
+        ...telegramBot.userStates.get(ctx.from.id),
+        enhancedPrompt: result.reply
+      });
+
       await ctx.reply('هل تريد حفظ هذا كتعليمات؟', {
         reply_markup: {
           inline_keyboard: [
-            [Markup.button.callback('✅ نعم', 'save_enhanced_' + encodeURIComponent(result.reply.substring(0, 60)))],
+            [Markup.button.callback('✅ نعم', 'save_enhanced')],
             [Markup.button.callback('❌ لا', 'train_ai')]
           ]
         }
@@ -850,6 +857,5 @@ module.exports = {
   handleAddAutoReply,
   finishAutoReply,
   handleURLTypeSelection,
-  handleSetLanguage,
-  finishAutoReply
+  handleSetLanguage
 };
