@@ -568,9 +568,35 @@ async function showStatistics(ctx) {
 
 // Handle disconnect
 async function handleDisconnect(ctx) {
-  const user = await db.getUserByTelegramId(ctx.from.id);
-  await db.updateUserConnection(user.id, null, null);
-  await ctx.reply('✅ تم قطع الواتساب.');
+  try {
+    const user = await db.getUserByTelegramId(ctx.from.id);
+    if (!user || !user.instance_name) {
+      await ctx.reply('⚠️ لم يتم العثور على جلسة نشطة لقطعها.');
+      return;
+    }
+
+    await ctx.reply('⏳ جاري قطع الاتصال، يرجى الانتظار...');
+
+    // 1. Delete instance from Evolution API
+    try {
+      const deleted = await evolutionAPI.deleteInstance(user.instance_name);
+      if (deleted) {
+        console.log(`✅ Instance ${user.instance_name} deleted from Evolution API`);
+      } else {
+        console.warn(`⚠️ Could not fully delete instance ${user.instance_name} from Evolution API, but proceeding with local cleanup.`);
+      }
+    } catch (evoError) {
+      console.error('❌ Unexpected error during Evolution API cleanup:', evoError.message);
+    }
+
+    // 2. Update database status
+    await db.updateUserConnection(user.id, null, null);
+
+    await ctx.reply('✅ تم قطع الاتصال بالواتساب بنجاح.');
+  } catch (error) {
+    console.error('Error in handleDisconnect:', error);
+    await ctx.reply('❌ حدث خطأ أثناء محاولة قطع الاتصال.');
+  }
 }
 
 // Add auto reply

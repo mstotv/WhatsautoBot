@@ -118,16 +118,29 @@ class EvolutionAPIService {
    */
   async deleteInstance(instanceName) {
     if (!this.client) {
-      throw new Error('Evolution API client not initialized. Check EVOLUTION_API_URL and EVOLUTION_API_KEY environment variables.');
+      throw new Error('Evolution API client not initialized.');
     }
 
+    console.log(`🗑️ Attempting to remove instance: ${instanceName}`);
+
+    // Attempt Logout
     try {
       await this.client.delete(`/instance/logout/${instanceName}`);
-      await this.client.delete(`/instance/delete/${instanceName}`);
+      console.log(`✅ Logout triggered for ${instanceName}`);
+    } catch (error) {
+      console.warn(`⚠️ Logout failed for ${instanceName} (might be already logged out):`, error.response?.data || error.message);
+    }
+
+    // Attempt Delete (even if logout fails)
+    try {
+      const response = await this.client.delete(`/instance/delete/${instanceName}`);
+      console.log(`✅ Instance ${instanceName} deleted from Evolution API`);
       return true;
     } catch (error) {
-      console.error('Error deleting instance:', error.response?.data || error.message);
-      throw error;
+      console.error(`❌ Delete failed for ${instanceName}:`, error.response?.data || error.message);
+      // We throw only if delete fails and logout failed, but actually for cleanup 
+      // it's better to return false and let the caller decide.
+      return false;
     }
   }
 
