@@ -58,6 +58,70 @@ class TelegramBot {
   }
 
   setupHandlers() {
+    // Connection Check Middleware
+    this.bot.use(async (ctx, next) => {
+      // Skip check for commands/actions that are necessary for connection, subscription or basic info
+      const allowedActions = [
+        'connect_whatsapp',
+        'subscribe_trial',
+        'renew_subscription',
+        'contact_admin',
+        'show_qr',
+        'check_connection',
+        'buy_plan',
+        'back_dashboard',
+        'set_language',
+        'main_menu',
+        'plans_menu',
+        'plisio',
+        'lang',
+        'admin' // Admin panel has its own check
+      ];
+
+      const allowedCommands = ['start', 'admin', 'help', 'id'];
+
+      // Extract command or action name
+      let actionName = '';
+      if (ctx.callbackQuery && ctx.callbackQuery.data) {
+        actionName = ctx.callbackQuery.data.split(':')[0];
+      } else if (ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
+        actionName = ctx.message.text.substring(1).split(' ')[0];
+      }
+
+      // If it's a message or callback that we don't recognize as a command/action (like text in conversation),
+      // we'll handle it later in handleTextMessage, but we should still check connection there.
+      // For now, if no actionName and it's a message, let it through to next handlers.
+      if (!actionName && !ctx.callbackQuery) return next();
+
+      // Check if action/command is allowed
+      const isAllowed = allowedActions.some(a => actionName && actionName.startsWith(a)) ||
+        allowedCommands.includes(actionName);
+
+      if (isAllowed) return next();
+
+      // For all other actions, check if user is connected
+      const user = await db.getUserByTelegramId(ctx.from.id);
+
+      // Allow if connected
+      if (!user || user.is_connected) return next();
+
+      // User is not connected, block action and prompt for connection
+      try {
+        if (ctx.callbackQuery) await ctx.answerCbQuery();
+      } catch (e) { }
+
+      const lang = user.language || 'ar';
+      return ctx.reply(lang === 'ar' ? '⚠️ <b>عذراً، يجب عليك ربط حسابك بالواتساب أولاً لاستخدام هذه الميزة.</b>' : '⚠️ <b>Sorry, you must connect your WhatsApp first to use this feature.</b>', {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback(lang === 'ar' ? '🔗 ربط واتساب الآن' : '🔗 Connect WhatsApp Now', 'connect_whatsapp')],
+            [Markup.button.callback(lang === 'ar' ? '🔙 العودة للقائمة الرئيسية' : '🔙 Back to Main Menu', 'back_dashboard')]
+          ]
+        }
+      });
+    });
+
     // Start command
     this.bot.start(async (ctx) => {
       const telegramId = ctx.from.id;

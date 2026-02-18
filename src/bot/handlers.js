@@ -575,24 +575,11 @@ async function handleDisconnect(ctx) {
       return;
     }
 
-    await ctx.reply('⏳ جاري قطع الاتصال، يرجى الانتظار...');
+    // Logical disconnect: only update database status
+    // We keep instance_name to allow easy reconnection later
+    await db.updateUserConnection(ctx.from.id, false, user.phone_number);
 
-    // 1. Delete instance from Evolution API
-    try {
-      const deleted = await evolutionAPI.deleteInstance(user.instance_name);
-      if (deleted) {
-        console.log(`✅ Instance ${user.instance_name} deleted from Evolution API`);
-      } else {
-        console.warn(`⚠️ Could not fully delete instance ${user.instance_name} from Evolution API, but proceeding with local cleanup.`);
-      }
-    } catch (evoError) {
-      console.error('❌ Unexpected error during Evolution API cleanup:', evoError.message);
-    }
-
-    // 2. Update database status
-    await db.updateUserConnection(user.id, null, null);
-
-    await ctx.reply('✅ تم قطع الاتصال بالواتساب بنجاح.');
+    await ctx.reply('✅ تم قطع الاتصال بالواتساب بنجاح.\n\nسيتم تجاهل أي رسائل واردة، ويجب عليك إعادة الربط لاستخدام البوت مجدداً.');
   } catch (error) {
     console.error('Error in handleDisconnect:', error);
     await ctx.reply('❌ حدث خطأ أثناء محاولة قطع الاتصال.');

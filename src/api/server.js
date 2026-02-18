@@ -167,6 +167,13 @@ class APIServer {
       console.log('❌ User not found for instance:', instanceName);
       return;
     }
+
+    // Ignore all events if the user is logically disconnected in our DB
+    if (!user.is_connected) {
+      console.log(`⚠️ User ${user.telegram_id} is logically disconnected. Ignoring event: ${data.event}`);
+      return;
+    }
+
     console.log(`👤 Mapped to user: ${user.telegram_id} (ID: ${user.id})`);
 
     // Handle different event types
