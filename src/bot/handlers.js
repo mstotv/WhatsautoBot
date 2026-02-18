@@ -501,8 +501,8 @@ async function handleBroadcastFlow(ctx, state, telegramBot) {
     await ctx.reply('هل تريد الإرسال؟', {
       reply_markup: {
         inline_keyboard: [
-          [Markup.button.callback('📤 إرسال', 'confirm_broadcast')],
-          [Markup.button.callback('❌ إلغاء', 'broadcast_menu')]
+          [Markup.button.callback('📤 إرسال', 'broadcast_send_now')],
+          [Markup.button.callback('❌ إلغاء', 'broadcast')]
         ]
       }
     });
@@ -519,24 +519,13 @@ async function confirmBroadcast(ctx, state, telegramBot) {
 
   for (const contact of contacts) {
     try {
+      const phoneNumber = contact.phone_number.split('@')[0];
       if (state.type === 'text') {
-        const axios = require('axios');
-        await axios.post(`http://localhost:8080/message/sendText/${user.instance_name}`, {
-          number: contact.phone_number.split('@')[0],
-          text: state.message
-        });
+        await evolutionAPI.sendTextMessage(user.instance_name, contact.phone_number, state.message);
       } else if (state.mediaType === 'image') {
-        await axios.post(`http://localhost:8080/message/sendImage/${user.instance_name}`, {
-          number: contact.phone_number.split('@')[0],
-          image: state.mediaUrl,
-          caption: state.message
-        });
+        await evolutionAPI.sendMediaMessage(user.instance_name, contact.phone_number, state.mediaUrl, state.message, 'image');
       } else if (state.mediaType === 'video') {
-        await axios.post(`http://localhost:8080/message/sendVideo/${user.instance_name}`, {
-          number: contact.phone_number.split('@')[0],
-          video: state.mediaUrl,
-          caption: state.message
-        });
+        await evolutionAPI.sendMediaMessage(user.instance_name, contact.phone_number, state.mediaUrl, state.message, 'video');
       }
       sent++;
     } catch (e) {

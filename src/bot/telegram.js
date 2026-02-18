@@ -610,29 +610,7 @@ class TelegramBot {
       await this.handleDocumentMessage(ctx);
     });
 
-    // AI Settings menu
-    this.bot.action('ai_settings', async (ctx) => {
-      try {
-        await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      const handlers = require('./handlers');
-      await handlers.showAISettings(ctx);
-    });
-
-
-
     // Additional action handlers
-    this.bot.action('setup_ai', async (ctx) => {
-      try {
-        await ctx.answerCbQuery();
-      } catch (e) {
-        console.error('Error answering callback query:', e.message);
-      }
-      const handlers = require('./handlers');
-      await handlers.handleSetupAI(ctx, this);
-    });
 
     // AI Language Selection
     this.bot.action(/^ai_lang_(.+)$/, async (ctx) => {
@@ -1254,20 +1232,8 @@ class TelegramBot {
         return;
       }
 
-      // Delete instance from Evolution API
-      if (user.instance_name) {
-        try {
-          await evolutionAPI.deleteInstance(user.instance_name);
-        } catch (e) {
-          console.error('Error deleting instance:', e.message);
-        }
-      }
-
-      // Update user in database
-      await pool.query(
-        "UPDATE users SET is_connected = false, instance_name = NULL, instance_token = NULL WHERE telegram_id = $1",
-        [telegramId]
-      );
+      // Logical disconnect: only update is_connected status (keep instance for easy reconnection)
+      await db.updateUserConnection(telegramId, false, user.phone_number);
 
       await ctx.reply('✅ تم قطع اتصال المستخدم بنجاح!');
       await this.showUserDetails(ctx, telegramId);
@@ -1467,9 +1433,11 @@ class TelegramBot {
       buttons.push([Markup.button.callback('🎁 تجربة مجانية 7 أيام', 'subscribe_trial')]);
     }
 
-    // Add buttons for each paid plan
+    // Add buttons for each paid plan (skip free/trial plans)
     for (const plan of plans) {
-      buttons.push([Markup.button.callback(`💳 ${plan.name} (${plan.price_usd}$)`, `buy_plan_${plan.id}`)]);
+      if (plan.price_usd > 0) {
+        buttons.push([Markup.button.callback(`💳 ${plan.name} (${plan.price_usd}$)`, `buy_plan_${plan.id}`)]);
+      }
     }
 
     buttons.push([Markup.button.callback('📞 تواصل للاشتراك', 'contact_admin')]);
@@ -1755,7 +1723,7 @@ class TelegramBot {
 
   // Show Admin Users
   async showAdminUsers(ctx) {
-    const users = await pool.query('SELECT telegram_id, telegram_username, is_connected, created_at FROM users ORDER BY created_at DESC LIMIT 20');
+    const users = await pool.query('SELECT telegram_id, telegram_username, is_connected, is_verified, instance_name, created_at FROM users ORDER BY created_at DESC LIMIT 20');
 
     let message = '👥 <b>إدارة المستخدمين</b>\n\n';
     message += '━━━━━━━━━━━━━━━━━━━━━\n';
@@ -1836,7 +1804,7 @@ class TelegramBot {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [user.is_connected ? Markup.button.callback('❌ قطع الاتصال', `admin_disconnect_${user.telegram_id}`) : Markup.button.callback('➕ إضافة مستخدم', `admin_add_user`)],
+          [user.is_connected ? Markup.button.callback('❌ قطع الاتصال', `admin_disconnect_${user.telegram_id}`) : Markup.button.callback('🔙 رجوع للمستخدمين', 'admin_users')],
           [Markup.button.callback('🔙 رجوع للمستخدمين', 'admin_users')]
         ]
       }
@@ -2218,12 +2186,6 @@ ${t('status_connected', lang)}
     if (state.action === 'add_auto_reply') {
       const handlers = require('./handlers');
       await handlers.handleAddAutoReply(ctx, state, this);
-    } else if (state.action === 'setup_ai') {
-      const handlers = require('./handlers');
-      await handlers.handleSetupAI(ctx, this);
-    } else if (state.action === 'setup_gemini') {
-      const handlers = require('./handlers');
-      await handlers.handleSetupGemini(ctx, this);
     } else if (state.action === 'setup_chatgpt') {
       const handlers = require('./handlers');
       await handlers.handleSetupChatGPT(ctx, this);
@@ -2270,7 +2232,7 @@ ${t('status_connected', lang)}
       }
 
       // Generate instance name and token
-      const instanceName = `wa_${telegramId}_${Date.now()}`;
+      const instanceName = `wa_${ctx.from.id}_${Date.now()}`;
       const instanceToken = require('crypto').randomBytes(16).toString('hex');
 
       // Save phone number
