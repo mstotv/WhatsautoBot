@@ -12,38 +12,39 @@ const fs = require('fs');
 async function showAISettings(ctx) {
   const user = await db.getUserByTelegramId(ctx.from.id);
   const aiSettings = await db.getAISettings(user.id);
+  const lang = user.language || 'ar';
 
-  let message = '🧠 <b>إعدادات الذكاء الاصطناعي</b>\n\n';
+  let message = '🧠 <b>' + t('ai_settings', lang) + '</b>\n\n';
   message += '━━━━━━━━━━━━━━━\n';
 
   if (aiSettings && aiSettings.is_active) {
-    message += `✅ <b>الحالة:</b> مفعل\n`;
-    message += `🔗 <b>المزود:</b> ChatGPT (OpenAI)\n`;
-    message += `🌐 <b>اللغة:</b> ${aiSettings.language || 'ar'}\n`;
+    message += `✅ <b>` + (lang === 'ar' ? 'الحالة:' : 'Status:') + `</b> ` + t('ai_active', lang) + `\n`;
+    message += `🔗 <b>` + (lang === 'ar' ? 'المزود:' : 'Provider:') + `</b> ChatGPT (OpenAI)\n`;
+    message += `🌐 <b>` + (lang === 'ar' ? 'اللغة:' : 'Language:') + `</b> ${aiSettings.language || 'ar'}\n`;
     if (aiSettings.system_prompt) {
       const prompt = aiSettings.system_prompt.substring(0, 100);
-      message += `📝 <b>التعليمات:</b> ${prompt}...\n`;
+      message += `📝 <b>` + (lang === 'ar' ? 'التعليمات:' : 'Instructions:') + `</b> ${prompt}...\n`;
     }
   } else {
-    message += '❌ <b>الحالة:</b> غير مفعل\n';
+    message += '❌ <b>' + (lang === 'ar' ? 'الحالة:' : 'Status:') + '</b> ' + t('ai_inactive', lang) + '\n';
   }
 
   message += '\n━━━━━━━━━━━━━━━\n';
-  message += '🔔 <b>الإشعارات:</b> ' + (user.notifications_enabled !== false ? '✅ مفعلة' : '❌ معطلة') + '\n';
+  message += '🔔 <b>' + (lang === 'ar' ? 'الإشعارات:' : 'Notifications:') + '</b> ' + (user.notifications_enabled !== false ? (lang === 'ar' ? '✅ مفعلة' : '✅ Enabled') : (lang === 'ar' ? '❌ معطلة' : '❌ Disabled')) + '\n';
   message += '━━━━━━━━━━━━━━━\n\n';
-  message += 'اختر المزود أو الإعداد:';
+  message += (lang === 'ar' ? 'اختر المزود أو الإعداد:' : 'Choose provider or setting:');
 
   const buttons = [
-    [Markup.button.callback('⚪ إعداد ChatGPT (OpenAI)', 'setup_chatgpt')],
-    [Markup.button.callback('🧠 تدريب الذكاء', 'train_ai')],
-    [Markup.button.callback(user.notifications_enabled !== false ? '🔕 إيقاف الإشعارات' : '🔔 تفعيل الإشعارات', 'toggle_notifications')]
+    [Markup.button.callback(lang === 'ar' ? '⚪ إعداد ChatGPT (OpenAI)' : '⚪ Setup ChatGPT (OpenAI)', 'setup_chatgpt')],
+    [Markup.button.callback(t('train_bot', lang), 'train_ai')],
+    [Markup.button.callback(user.notifications_enabled !== false ? (lang === 'ar' ? '🔕 إيقاف الإشعارات' : '🔕 Stop Notifications') : (lang === 'ar' ? '🔔 تفعيل الإشعارات' : '🔔 Enable Notifications'), 'toggle_notifications')]
   ];
 
   if (aiSettings && aiSettings.is_active) {
-    buttons.push([Markup.button.callback('❌ تعطيل الذكاء', 'disable_ai')]);
+    buttons.push([Markup.button.callback(t('disable_ai', lang), 'disable_ai')]);
   }
 
-  buttons.push([Markup.button.callback('🔙 العودة', 'back_dashboard')]);
+  buttons.push([Markup.button.callback(t('back', lang), 'back_dashboard')]);
 
   await ctx.reply(message, {
     parse_mode: 'HTML',

@@ -2204,11 +2204,11 @@ ${t('status_connected', lang)}
     await ctx.reply(message, Markup.inlineKeyboard([
       [Markup.button.callback(t('auto_replies', lang), 'auto_replies')],
       [Markup.button.callback(t('broadcast', lang), 'broadcast')],
-      [Markup.button.callback(lang === 'ar' ? '🧠 إعدادات الذكاء الاصطناعي' : '🧠 AI Settings', 'ai_settings')],
-      [Markup.button.callback(lang === 'ar' ? '📥 تصدير الطلبات (Excel)' : '📥 Export Orders (Excel)', 'export_orders')],
-      [Markup.button.callback(lang === 'ar' ? '🏪 إعدادات المتجر (الفواتير)' : '🏪 Store Settings (Invoices)', 'store_settings')],
+      [Markup.button.callback(t('ai_settings_btn', lang), 'ai_settings')],
+      [Markup.button.callback(t('export_orders_btn', lang), 'export_orders')],
+      [Markup.button.callback(t('store_settings_btn', lang), 'store_settings')],
       [Markup.button.callback(t('change_language', lang), 'change_language')],
-      [Markup.button.callback('📊 تقارير الطلبات', 'order_reports')],
+      [Markup.button.callback(t('order_reports', lang), 'order_reports')],
       [Markup.button.callback(t('statistics', lang), 'statistics')],
       [Markup.button.callback(t('disconnect', lang), 'disconnect')]
     ]));
@@ -2918,3 +2918,4 @@ ${t('status_connected', lang)}
 }
 
 module.exports = TelegramBot;
+

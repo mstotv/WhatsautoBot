@@ -85,6 +85,10 @@ const translations = {
         total_contacts: '📱 عدد الجهات:',
         active_autoreplies: '🤖 الردود:',
         total_broadcasts: '📢 الرسائل:',
+        ai_settings_btn: '🧠 إعدادات الذكاء الاصطناعي',
+        export_orders_btn: '📥 تصدير الطلبات (Excel)',
+        store_settings_btn: '🏪 إعدادات المتجر (الفواتير)',
+        order_reports: '📊 تقارير الطلبات'
     },
     en: {
         dashboard_title: '📊 Dashboard',
@@ -171,6 +175,10 @@ const translations = {
         total_contacts: '📱 Total:',
         active_autoreplies: '🤖 Replies:',
         total_broadcasts: '📢 Messages:',
+        ai_settings_btn: '🧠 AI Settings',
+        export_orders_btn: '📥 Export Orders (Excel)',
+        store_settings_btn: '🏪 Store Settings (Invoices)',
+        order_reports: '📊 Order Reports'
     },
     fr: {
         dashboard_title: '📊 Tableau de bord',
@@ -257,6 +265,10 @@ const translations = {
         total_contacts: '📱 Total:',
         active_autoreplies: '🤖 Réponses:',
         total_broadcasts: '📢 Messages:',
+        ai_settings_btn: '🧠 Paramètres IA',
+        export_orders_btn: '📥 Exporter Commandes (Excel)',
+        store_settings_btn: '🏪 Paramètres Boutique (Factures)',
+        order_reports: '📊 Rapports de Commandes'
     },
     de: {
         dashboard_title: '📊 Dashboard',
@@ -343,7 +355,11 @@ const translations = {
         total_contacts: '📱 Gesamt:',
         active_autoreplies: '🤖 Antworten:',
         total_broadcasts: '📢 Nachrichten:',
-    }
+        ai_settings_btn: '🧠 KI-Einstellungen',
+        export_orders_btn: '📥 Bestellungen Exportieren (Excel)',
+        store_settings_btn: '🏪 Shop-Einstellungen (Rechnungen)',
+        order_reports: '📊 Bestellberichte'
+    },
 };
 
 function t(key, lang = 'ar') {
